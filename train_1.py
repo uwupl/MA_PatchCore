@@ -218,8 +218,9 @@ class PatchCore(pl.LightningModule):
         self.warm_up_reps = 10 # before the actual measurement is done, we execute the process a couple of times without measurement to ensure that there is no influence of initialization and that the circumstances (e.g. thermal state of hardware) are representive.
         self.cuda_active = torch.cuda.is_available()
         self.dim_reduction = False
-        self.log_file_name = 'trial_1204.csv'
+        self.log_file_name = 'trial_1304.csv'
         self.save_am = False
+        self.only_img_lvl = True
         
         self.save_hyperparameters(hparams)
 
@@ -455,10 +456,10 @@ class PatchCore(pl.LightningModule):
             for k in range(x_batch.size()[0]):
                 this_score_patches, this_anomaly_map = results[0][k], results[1][k]
                 x, gt, label, file_name, x_type = x_batch[k], gt_batch[k], label_batch[k], file_name_batch[k], x_type_batch[k]
-                self.eval_one_step_test(score_patches=this_score_patches, anomaly_map=this_anomaly_map, x=x, gt=gt, label=label, file_name=file_name, x_type=x_type)
+                self.eval_one_step_test(score_patches=this_score_patches, score=score, anomaly_map=this_anomaly_map, x=x, gt=gt, label=label, file_name=file_name, x_type=x_type)
         else:
             x, gt, label, file_name, x_type = batch
-            self.eval_one_step_test(score_patches, anomaly_map, x, gt, label, file_name, x_type)
+            self.eval_one_step_test(score_patches, score, anomaly_map, x, gt, label, file_name, x_type)
             
                                
     def test_step_core(self, batch, measure=False):
@@ -474,8 +475,11 @@ class PatchCore(pl.LightningModule):
             embeddings = self.feature_embedding(features=features, batch_size_1=batch_size_1, batch_size=batch_size)
             score_patches = self.calc_score_patches(embeddings=embeddings, batch_size_1=batch_size_1)
             score = self.calc_img_score(score_patches=score_patches)
-            anomaly_map = self.calc_anomaly_map(score_patches=score_patches, batch_size_1=batch_size_1)
-            
+            if not self.only_img_lvl:
+                anomaly_map = self.calc_anomaly_map(score_patches=score_patches, batch_size_1=batch_size_1)
+            else:
+                anomaly_map = None
+                
             return features, embeddings, score_patches, score, anomaly_map 
             
         else:
@@ -535,8 +539,10 @@ class PatchCore(pl.LightningModule):
             # AMOMALY MAP
             t_4_cpu = record_cpu()
             t_4_gpu = record_gpu(t_4_gpu)
-            
-            anomaly_map = self.calc_anomaly_map(score_patches=score_patches, batch_size_1=batch_size_1)
+            if not self.only_img_lvl:
+                anomaly_map = self.calc_anomaly_map(score_patches=score_patches, batch_size_1=batch_size_1)
+            else:
+                anomaly_map = None
             # ANOMALY MAP
             ############################################################
             
@@ -621,25 +627,17 @@ class PatchCore(pl.LightningModule):
             anomaly_map_resized_blur = [gaussian_filter(this_anomaly_map_resized, sigma=4) for this_anomaly_map_resized in anomaly_map_resized]
         return anomaly_map_resized_blur
     
-    def eval_one_step_test(self, score_patches, anomaly_map, x, gt, label, file_name, x_type):
+    def eval_one_step_test(self, score_patches, score, anomaly_map, x, gt, label, file_name, x_type):
         '''
         Extracted evaluation of single output
         '''
         if x.dim() != 4:
             x, gt, label = x.unsqueeze(0), gt.unsqueeze(0), label.unsqueeze(0)
-        N_b = score_patches[np.argmax(score_patches[:,0])].astype(np.longfloat) # max of each patch
-        N_b_exp = np.exp(N_b)
-        N_b_exp = N_b_exp[~np.isinf(N_b_exp)]
-        if len(N_b_exp) > 0:
-            w = (1 - (np.max(N_b_exp))/np.sum(N_b_exp)) # scaling factor in paper
-        else:
-            w = np.nan
-        if math.isnan(w):  
-            w = 1.0
-        score = w*max(score_patches[:,0])
-        gt_np = gt.cpu().numpy()[0,0].astype(int)
-        self.gt_list_px_lvl.extend(gt_np.ravel()) # ravel equivalent reshape(-1); flattening of ground_truth pixel wise
-        self.pred_list_px_lvl.extend(anomaly_map.ravel()) # flattening of pred pixel wise
+        
+        if not self.only_img_lvl:
+            gt_np = gt.cpu().numpy()[0,0].astype(int)
+            self.gt_list_px_lvl.extend(gt_np.ravel()) # ravel equivalent reshape(-1); flattening of ground_truth pixel wise
+            self.pred_list_px_lvl.extend(anomaly_map.ravel()) # flattening of pred pixel wise
         self.gt_list_img_lvl.append(label.cpu().numpy()[0]) # ground_truth for image wise
         self.pred_list_img_lvl.append(score) # image level score appended
         self.img_path_list.extend(file_name) # same for file_name
@@ -652,9 +650,12 @@ class PatchCore(pl.LightningModule):
             self.save_anomaly_map(anomaly_map, input_x, gt_np*255, file_name[0], x_type[0]) # save of everything
         
     def test_epoch_end(self, outputs):
-        print("Total pixel-level auc-roc score :")
-        pixel_auc = roc_auc_score(self.gt_list_px_lvl, self.pred_list_px_lvl)
-        print(pixel_auc)
+        if not self.only_img_lvl:
+            print("Total pixel-level auc-roc score :")
+            pixel_auc = roc_auc_score(self.gt_list_px_lvl, self.pred_list_px_lvl)
+            print(pixel_auc)
+        else:
+            pixel_auc = 0.0
         print("Total image-level auc-roc score :")
         img_auc = roc_auc_score(self.gt_list_img_lvl, self.pred_list_img_lvl)
         print(img_auc)
@@ -687,7 +688,7 @@ def get_args():
     import argparse
     parser = argparse.ArgumentParser(description='ANOMALYDETECTION')
     parser.add_argument('--phase', choices=['train','test'], default='train')
-    parser.add_argument('--dataset_path', default=r'/media/jo/Crucial 1TB/UNI/IIIT_Muen/MA/MVTechAD')
+    parser.add_argument('--dataset_path', default=r'/mnt/crucial/UNI/IIIT_Muen/MA/MVTechAD')
     parser.add_argument('--category', default='own')
     parser.add_argument('--num_epochs', default=1)
     parser.add_argument('--batch_size', default=32)
