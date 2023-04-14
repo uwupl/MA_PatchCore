@@ -213,14 +213,18 @@ class PatchCore(pl.LightningModule):
         # options
         self.faiss = True # temp
         self.quantization = False
-        self.measure_inference = True
+        self.measure_inference = False
         self.number_of_reps = 50 # number of reps during measurement. Beacause we can assume a consistent estimator, results get more accurate with more reps
         self.warm_up_reps = 10 # before the actual measurement is done, we execute the process a couple of times without measurement to ensure that there is no influence of initialization and that the circumstances (e.g. thermal state of hardware) are representive.
         self.cuda_active = torch.cuda.is_available()
         self.dim_reduction = False
-        self.log_file_name = 'trial_1304.csv'
+        self.log_file_name = f'trial_{int(time.time())}.csv'
         self.save_am = False
         self.only_img_lvl = True
+        self.save_features = False
+        if self.save_features:
+            self.features_to_store = []
+        self.save_embeddings = True
         
         self.save_hyperparameters(hparams)
 
@@ -235,7 +239,7 @@ class PatchCore(pl.LightningModule):
             param.requires_grad = False
 
         # feature map selection
-        self.model.layer2[-1].register_forward_hook(hook_t)
+        # self.model.layer2[-1].register_forward_hook(hook_t)
         self.model.layer3[-1].register_forward_hook(hook_t)
 
         self.criterion = torch.nn.MSELoss(reduction='sum')
@@ -323,15 +327,36 @@ class PatchCore(pl.LightningModule):
     def training_step(self, batch, batch_idx): # save locally aware patch features
         x, _, _, _, _ = batch
         features = self(x)
+        if self.save_features: # only one layer at a time!!
+            self.features_to_store.append(features[0].detach().cpu())        
         embeddings = []
-        for feature in features:
-            m = torch.nn.AvgPool2d(3, 1, 1)
-            embeddings.append(m(feature))
-        embedding = embedding_concat(embeddings[0], embeddings[1])
+        for k, feature in enumerate(features):
+            pooled_feature = torch.nn.AvgPool2d(3, 1, 1)(feature)#self.adaptive_pooling(feature)# using AvgPool2d to calculate local-aware features
+            # if k in args.feature_map_to_reduce and args.partial_reduction:
+            #     org_shape = pooled_feature.shape
+            #     pooled_feature = self.partial_reducer.transform(np.reshape(pooled_feature.cpu(), (-1, org_shape[1])))
+            #     pooled_feature = torch.from_numpy(np.reshape(pooled_feature, (org_shape[0],-1, org_shape[2], org_shape[3])))
+            #     if not pooled_feature.device.__str__().__contains__(self.accelerator):
+            #         pooled_feature = pooled_feature.to(self.accelerator)
+            embeddings.append(pooled_feature)
+        embedding = self.embedding_concat_frame(embeddings=embeddings) # shape (batch, 448, 16, 16) --> default
         self.embedding_list.extend(reshape_embedding(np.array(embedding)))
             
-    def training_epoch_end(self, outputs): 
+    def training_epoch_end(self, outputs):
+        if self.save_features:
+            file_name_features = input('file name for features:\n')
+            # feature_save = np.array([])
+            for k1, el in enumerate(self.features_to_store):
+                for k2, l in enumerate(el):
+                    if k1 == 0 and k2 == 0:
+                        feature_save = np.expand_dims(l.cpu().numpy(), axis=0)
+                    feature_save = np.append(feature_save, np.expand_dims(l.cpu().numpy(), axis=0), axis=0)
+            print(feature_save.shape)
+            np.save(file_name_features + '.npy', feature_save)
         total_embeddings = np.array(self.embedding_list)
+        if self.save_embeddings:
+            file_name_embeddings = input('file name for embeddings:\n')
+            np.save(file_name_embeddings + '.npy', total_embeddings)
         # Random projection
         self.randomprojector = SparseRandomProjection(n_components='auto', eps=0.9) # 'auto' => Johnson-Lindenstrauss lemma
         self.randomprojector.fit(total_embeddings)
@@ -662,6 +687,12 @@ class PatchCore(pl.LightningModule):
         print('test_epoch_end')
         values = {'pixel_auc': pixel_auc, 'img_auc': img_auc}
         self.log_dict(values)
+        if os.path.exists(os.path.join(os.path.dirname(__file__), "results","csv", self.log_file_name)) and self.measure_inference:
+            pd_run_times_ = pd.read_csv(os.path.join(os.path.dirname(__file__), "results", "csv",self.log_file_name), index_col=0)
+            pd_results = pd.DataFrame({'img_auc': [img_auc]*pd_run_times_.shape[0], 'pixel_auc': [pixel_auc]*pd_run_times_.shape[0]})
+            pd_run_times = pd.concat([pd_run_times_, pd_results], axis=1)
+            pd_run_times.to_csv(os.path.join(os.path.dirname(__file__), "results", "csv",self.log_file_name))
+            print(f'\n\nMEAN INFERENCE TIME: {pd_run_times["#11 whole process cpu"].mean()} ms\n')
 
     def embedding_concat_frame(self, embeddings):
         '''
