@@ -22,6 +22,7 @@ from sklearn.neighbors import NearestNeighbors
 import time
 import math
 from time import perf_counter as record_cpu
+from anomalib.models.components.sampling import k_center_greedy
 
 def record_gpu(cuda_event):
     '''
@@ -224,7 +225,9 @@ class PatchCore(pl.LightningModule):
         self.save_features = False
         if self.save_features:
             self.features_to_store = []
-        self.save_embeddings = True
+        self.save_embeddings = False
+        self.reduce_via_std = False
+        self.reduce_via_entropy = True
         
         self.save_hyperparameters(hparams)
 
@@ -234,13 +237,13 @@ class PatchCore(pl.LightningModule):
 
         # backbone selection   
         self.model = torch.hub.load('pytorch/vision:v0.9.0', 'wide_resnet50_2', pretrained=True)
-
+        
         for param in self.model.parameters():
             param.requires_grad = False
 
         # feature map selection
-        # self.model.layer2[-1].register_forward_hook(hook_t)
-        self.model.layer3[-1].register_forward_hook(hook_t)
+        self.model.layer2[-1].register_forward_hook(hook_t)
+        # self.model.layer3[-1].register_forward_hook(hook_t)
 
         self.criterion = torch.nn.MSELoss(reduction='sum')
 
@@ -354,17 +357,37 @@ class PatchCore(pl.LightningModule):
             print(feature_save.shape)
             np.save(file_name_features + '.npy', feature_save)
         total_embeddings = np.array(self.embedding_list)
+        
+        if self.reduce_via_std:
+            percentile_std = 50
+            self.idx_chosen = np.argwhere(np.std(total_embeddings, axis=0)>np.percentile(np.std(total_embeddings,axis=0), percentile_std))[:,0]
+            total_embeddings = np.take(total_embeddings, self.idx_chosen, axis=1)#total_embeddings[:,self.idx_with_high_std]
+        if self.reduce_via_entropy:
+            percentile_entropy = 80
+            total_embeddings_copy = total_embeddings.copy()
+            total_embeddings_copy[total_embeddings_copy<1e-15] = 1e-15
+            entropy = -np.sum(total_embeddings_copy*np.log2(total_embeddings_copy), axis=0)#.shape
+            self.idx_chosen = np.argwhere(entropy>np.percentile(entropy, percentile_entropy))[:,0]
+            total_embeddings = np.take(total_embeddings, self.idx_chosen, axis=1)
         if self.save_embeddings:
             file_name_embeddings = input('file name for embeddings:\n')
             np.save(file_name_embeddings + '.npy', total_embeddings)
         # Random projection
-        self.randomprojector = SparseRandomProjection(n_components='auto', eps=0.9) # 'auto' => Johnson-Lindenstrauss lemma
-        self.randomprojector.fit(total_embeddings)
-        # Coreset Subsampling
-        selector = kCenterGreedy(total_embeddings,0,0)
-        selected_idx = selector.select_batch(model=self.randomprojector, already_selected=[], N=int(total_embeddings.shape[0]*args.coreset_sampling_ratio))
-        self.embedding_coreset = total_embeddings[selected_idx]
-        
+        if args.coreset_sampling_ratio == 1.0:
+            self.embedding_coreset = total_embeddings
+        else:                  
+            if False: # two different implementation that yield the same result (approximately)
+                self.randomprojector = SparseRandomProjection(n_components='auto', eps=0.9) # 'auto' => Johnson-Lindenstrauss lemma
+                self.randomprojector.fit(total_embeddings)
+                # Coreset Subsampling
+                selector = kCenterGreedy(total_embeddings,0,0)
+                selected_idx = selector.select_batch(model=self.randomprojector, already_selected=[], N=int(total_embeddings.shape[0]*args.coreset_sampling_ratio))
+            else:
+                sampler = k_center_greedy.KCenterGreedy(embedding=torch.from_numpy(total_embeddings), sampling_ratio=float(args.coreset_sampling_ratio))
+                selected_idx = sampler.select_coreset_idxs()
+            
+            self.embedding_coreset = total_embeddings[selected_idx]
+            
         print('initial embedding size : ', total_embeddings.shape)
         print('final embedding size : ', self.embedding_coreset.shape)
         #faiss
@@ -600,11 +623,17 @@ class PatchCore(pl.LightningModule):
             selected_features.append(pooled_features)
         
         concatenated_features = self.embedding_concat_frame(embeddings=selected_features)
+            
         
         if batch_size_1:
-            return np.array(reshape_embedding(np.array(concatenated_features)))
+            flattened_features = np.array(reshape_embedding(np.array(concatenated_features)))
         else:
-            return np.array([np.array(reshape_embedding(np.array(concatenated_features[k,...].unsqueeze(0)))) for k in range(batch_size)])
+            flattened_features = np.array([np.array(reshape_embedding(np.array(concatenated_features[k,...].unsqueeze(0)))) for k in range(batch_size)])
+        
+        if self.reduce_via_std or self.reduce_via_entropy:
+            return np.take(flattened_features, self.idx_chosen, axis=1)#indices=#[:,self.idx_with_high_std]
+        else:
+            return flattened_features
         
     def calc_score_patches(self, embeddings, batch_size_1):
         '''
@@ -725,7 +754,7 @@ def get_args():
     parser.add_argument('--batch_size', default=32)
     parser.add_argument('--load_size', default=224)
     parser.add_argument('--input_size', default=224)
-    parser.add_argument('--coreset_sampling_ratio', default=0.001)
+    parser.add_argument('--coreset_sampling_ratio', default=0.01)
     parser.add_argument('--project_root_path', default=r'./test')
     parser.add_argument('--save_src_code', default=True)
     parser.add_argument('--save_anomaly_map', default=True)
