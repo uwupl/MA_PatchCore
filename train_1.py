@@ -24,6 +24,7 @@ import math
 from time import perf_counter as record_cpu
 from anomalib.models.components.sampling import k_center_greedy
 
+
 def record_gpu(cuda_event):
     '''
     gpu_measurement
@@ -229,6 +230,8 @@ class PatchCore(pl.LightningModule):
         self.reduce_via_std = False
         self.reduce_via_entropy = True
         
+        self.pruning = True
+        
         self.save_hyperparameters(hparams)
 
         self.init_features()
@@ -360,10 +363,12 @@ class PatchCore(pl.LightningModule):
         
         if self.reduce_via_std:
             percentile_std = 50
+            org_no_channels = total_embeddings.shape[1]
             self.idx_chosen = np.argwhere(np.std(total_embeddings, axis=0)>np.percentile(np.std(total_embeddings,axis=0), percentile_std))[:,0]
             total_embeddings = np.take(total_embeddings, self.idx_chosen, axis=1)#total_embeddings[:,self.idx_with_high_std]
         if self.reduce_via_entropy:
-            percentile_entropy = 80
+            percentile_entropy = 90
+            org_no_channels = total_embeddings.shape[1]
             total_embeddings_copy = total_embeddings.copy()
             total_embeddings_copy[total_embeddings_copy<1e-15] = 1e-15
             entropy = -np.sum(total_embeddings_copy*np.log2(total_embeddings_copy), axis=0)#.shape
@@ -372,6 +377,46 @@ class PatchCore(pl.LightningModule):
         if self.save_embeddings:
             file_name_embeddings = input('file name for embeddings:\n')
             np.save(file_name_embeddings + '.npy', total_embeddings)
+        if self.pruning and (self.reduce_via_entropy or self.reduce_via_std):
+            print('Pruning ...')
+            import torch_pruning as tp
+            from torchinfo import summary
+            print('full net:') # TODO: Replace with args
+            summary(self.model, input_size=(1,3,224,224), depth=3, verbose=1)
+            model_full = torch.hub.load('pytorch/vision:v0.9.0', 'wide_resnet50_2', pretrained=True)#self.model.copy()
+            layer_to_include = 2
+            model_cutted = torch.nn.Sequential(*(list(model_full.children())[0:int(4+layer_to_include)])) # TODO: Replace with args
+            print('\n\nnet cutted:')
+            summary(model_cutted, input_size=(1,3,224,224), depth=3, verbose=1)# TODO: Replace with args
+            model_cutted.to('cpu')
+            DG = tp.DependencyGraph().build_dependency(model_cutted, example_inputs=torch.randn(1,3,224,224)) # TODO: Replace with args
+            channels_not_selected = [i for i in range(org_no_channels) if i not in self.idx_chosen]
+            print(model_cutted[5][3].conv3)
+            group = DG.get_pruning_group(model_cutted[5][3].conv3, tp.prune_conv_out_channels, idxs=channels_not_selected) # take last conv of 2nd Layer # TODO dynamic!
+            if DG.check_pruning_group(group):
+                group.prune()
+            
+            print('\n\nfully pruned:')
+            summary(model_cutted, input_size=(1,3,224,224), depth=3, verbose=1)
+            
+            self.init_features()
+            def hook_t(module, input, output):
+                self.features.append(output)
+
+            # backbone selection   
+            self.model = model_cutted.to('cuda') #TODO
+        
+            for param in self.model.parameters():
+                param.requires_grad = False
+
+            # feature map selection
+            self.model[-1][-1].register_forward_hook(hook_t)
+            # self.model.layer3[-1].register_forward_hook(hook_t)
+
+            self.criterion = torch.nn.MSELoss(reduction='sum')
+
+            self.init_results_list()
+                
         # Random projection
         if args.coreset_sampling_ratio == 1.0:
             self.embedding_coreset = total_embeddings
@@ -630,7 +675,7 @@ class PatchCore(pl.LightningModule):
         else:
             flattened_features = np.array([np.array(reshape_embedding(np.array(concatenated_features[k,...].unsqueeze(0)))) for k in range(batch_size)])
         
-        if self.reduce_via_std or self.reduce_via_entropy:
+        if (self.reduce_via_std or self.reduce_via_entropy) and not self.pruning:
             return np.take(flattened_features, self.idx_chosen, axis=1)#indices=#[:,self.idx_with_high_std]
         else:
             return flattened_features
@@ -749,12 +794,12 @@ def get_args():
     parser = argparse.ArgumentParser(description='ANOMALYDETECTION')
     parser.add_argument('--phase', choices=['train','test'], default='train')
     parser.add_argument('--dataset_path', default=r'/mnt/crucial/UNI/IIIT_Muen/MA/MVTechAD')
-    parser.add_argument('--category', default='own')
+    parser.add_argument('--category', default='grid')
     parser.add_argument('--num_epochs', default=1)
     parser.add_argument('--batch_size', default=32)
     parser.add_argument('--load_size', default=224)
     parser.add_argument('--input_size', default=224)
-    parser.add_argument('--coreset_sampling_ratio', default=0.01)
+    parser.add_argument('--coreset_sampling_ratio', default=1.0)
     parser.add_argument('--project_root_path', default=r'./test')
     parser.add_argument('--save_src_code', default=True)
     parser.add_argument('--save_anomaly_map', default=True)
