@@ -23,6 +23,9 @@ import time
 import math
 from time import perf_counter as record_cpu
 from anomalib.models.components.sampling import k_center_greedy
+import torch_pruning as tp
+from torchinfo import summary
+from collections import OrderedDict
 
 
 def record_gpu(cuda_event):
@@ -83,6 +86,41 @@ class KNN(NN):
         dist = torch.cdist(x, self.train_pts, self.p)
         knn = dist.topk(self.k, largest=False)
         return knn
+
+class OwnBottleneck(torch.nn.Module):
+    def __init__(self, block_1, block_2, block_3, idx_selected, input_size):
+        '''
+        just pass OderedDicts, bottleneck like layer is created.
+        '''
+        super().__init__()
+        self.block_1 = torch.nn.Sequential(block_1)
+        self.block_2 = torch.nn.Sequential(block_2)
+        self.block_3 = torch.nn.Sequential(block_3)
+        self.relu = torch.nn.ReLU(inplace=True)
+        self.idx_selected = idx_selected
+        channels_not_selected = [i for i in range(input_size[1]*2) if i not in idx_selected]
+        DG = tp.DependencyGraph().build_dependency(self.block_3, example_inputs=torch.rand(input_size))
+        group = DG.get_pruning_group(self.block_3.final_4, tp.prune_conv_out_channels, idxs=channels_not_selected)
+        print(group)
+        if DG.check_pruning_group(group): # avoid full pruning, i.e., channels=0.  
+            group.prune()
+        
+    def forward(self, x):
+        identity = x
+        
+        out = self.block_1(x)
+        out = self.relu(out)
+        
+        out = self.block_2(out)
+        out = self.relu(out)
+        
+        out = self.block_3(out)
+        identity = identity[:,self.idx_selected,...]
+        
+        out += identity
+        out = self.relu(out)
+                
+        return out
 
 def prep_dirs(root):
     # make embeddings dir
@@ -215,7 +253,7 @@ class PatchCore(pl.LightningModule):
         # options
         self.faiss = True # temp
         self.quantization = False
-        self.measure_inference = False
+        self.measure_inference = True
         self.number_of_reps = 50 # number of reps during measurement. Beacause we can assume a consistent estimator, results get more accurate with more reps
         self.warm_up_reps = 10 # before the actual measurement is done, we execute the process a couple of times without measurement to ensure that there is no influence of initialization and that the circumstances (e.g. thermal state of hardware) are representive.
         self.cuda_active = torch.cuda.is_available()
@@ -228,9 +266,9 @@ class PatchCore(pl.LightningModule):
             self.features_to_store = []
         self.save_embeddings = False
         self.reduce_via_std = False
-        self.reduce_via_entropy = True
+        self.reduce_via_entropy = False
         
-        self.pruning = True
+        self.pruning = False
         
         self.save_hyperparameters(hparams)
 
@@ -363,9 +401,10 @@ class PatchCore(pl.LightningModule):
         
         if self.reduce_via_std:
             percentile_std = 50
-            org_no_channels = total_embeddings.shape[1]
+            org_no_channels = total_embeddings.shape[1] # total_embeddings = (200000, 512)
             self.idx_chosen = np.argwhere(np.std(total_embeddings, axis=0)>np.percentile(np.std(total_embeddings,axis=0), percentile_std))[:,0]
-            total_embeddings = np.take(total_embeddings, self.idx_chosen, axis=1)#total_embeddings[:,self.idx_with_high_std]
+            total_embeddings = np.take(total_embeddings, self.idx_chosen, axis=1)#total_embeddings[:,self.idx_with_high_std] # c contigous
+        
         if self.reduce_via_entropy:
             percentile_entropy = 90
             org_no_channels = total_embeddings.shape[1]
@@ -379,43 +418,84 @@ class PatchCore(pl.LightningModule):
             np.save(file_name_embeddings + '.npy', total_embeddings)
         if self.pruning and (self.reduce_via_entropy or self.reduce_via_std):
             print('Pruning ...')
-            import torch_pruning as tp
-            from torchinfo import summary
+
+            # import copy
+            
             print('full net:') # TODO: Replace with args
-            summary(self.model, input_size=(1,3,224,224), depth=3, verbose=1)
+            summary(self.model, depth=5, input_size=(1,3,224,224), col_names=['input_size', 'output_size', 'trainable', 'mult_adds', 'num_params'])
             model_full = torch.hub.load('pytorch/vision:v0.9.0', 'wide_resnet50_2', pretrained=True)#self.model.copy()
-            layer_to_include = 2
-            model_cutted = torch.nn.Sequential(*(list(model_full.children())[0:int(4+layer_to_include)])) # TODO: Replace with args
-            print('\n\nnet cutted:')
-            summary(model_cutted, input_size=(1,3,224,224), depth=3, verbose=1)# TODO: Replace with args
-            model_cutted.to('cpu')
-            DG = tp.DependencyGraph().build_dependency(model_cutted, example_inputs=torch.randn(1,3,224,224)) # TODO: Replace with args
-            channels_not_selected = [i for i in range(org_no_channels) if i not in self.idx_chosen]
-            print(model_cutted[5][3].conv3)
-            group = DG.get_pruning_group(model_cutted[5][3].conv3, tp.prune_conv_out_channels, idxs=channels_not_selected) # take last conv of 2nd Layer # TODO dynamic!
-            if DG.check_pruning_group(group):
-                group.prune()
+            layer_to_include = 2 #TODO
+            # model_cutted = torch.nn.Sequential(*(list(model_full.children())[0:int(4+layer_to_include)])) # TODO: Replace with args
+            # print('\n\nnet cutted:')
+            # summary(model_cutted, input_size=(1,3,224,224), depth=3, verbose=1)# TODO: Replace with args
+            # model_cutted.to('cpu')
+            # DG = tp.DependencyGraph().build_dependency(model_cutted, example_inputs=torch.randn(1,3,224,224)) # TODO: Replace with args
+            # channels_not_selected = [i for i in range(org_no_channels) if i not in self.idx_chosen]
+            # print(model_cutted[5][3].conv3)
+            # group = DG.get_pruning_group(model_cutted[5][3].conv3, tp.prune_conv_out_channels, idxs=channels_not_selected) # take last conv of 2nd Layer # TODO dynamic!
+            # if DG.check_pruning_group(group):
+            #     group.prune()
             
-            print('\n\nfully pruned:')
-            summary(model_cutted, input_size=(1,3,224,224), depth=3, verbose=1)
-            
+            # print('\n\nfully pruned:')
+            # summary(model_cutted, input_size=(1,3,224,224), depth=3, verbose=1)
+            # this_model = torch.nn.Sequential(*(list(model_full.children())[:int(4+layer_to_include)]))
+            # DG = tp.DependencyGraph().build_dependency(this_model, example_inputs=torch.randn(1,3,224,224))
+            # group = DG.get_pruning_group(this_model[-1][-1].conv3, tp.prune_conv_out_channels, idxs=channels_not_selected)
+            model_1st = torch.nn.Sequential(*(list(model_full.children())[:int(4+layer_to_include-1)]))
+            model_2nd_layer_1 = torch.nn.Sequential(*(list(model_full.children())[int(4+layer_to_include-1)][:-1]))
+            model_2nd_layer_2_tmp = torch.nn.Sequential(*(list(model_full.children())[int(4+layer_to_include-1)][-1:]))
+            # last_layer_orderered_dict = OrderedDict([(f'final_{i}', module) for i, module in enumerate(model_2nd_layer_2_tmp[0].modules()) if i != 0])
+            # last_layer = torch.nn.Sequential(last_layer_orderered_dict)
+            dict_1 = OrderedDict([(f'final_{i}', module) for i, module in enumerate(model_2nd_layer_2_tmp[-1].children()) if i<2])
+            dict_2 = OrderedDict([(f'final_{i}', module) for i, module in enumerate(model_2nd_layer_2_tmp[-1].children()) if i<4 and i>=2])
+            dict_3 = OrderedDict([(f'final_{i}', module) for i, module in enumerate(model_2nd_layer_2_tmp[-1].children()) if i<6 and i>=4])
+            print(dict_3)
+            input_size = (1,256,28,28) #TODO dynamicalyy
+            new_layer = OwnBottleneck(dict_1, dict_2, dict_3, self.idx_chosen, input_size)
+            # this_model = torch.nn.Sequential(*(list(model_full.children())[0:int(4+layer_to_include)]))
+
+            # DG = tp.DependencyGraph().build_dependency(new_layer, example_inputs=torch.randn(1,512,28,28)) # TODO
+
+            # # 2. Specify the to-be-pruned channels. Here we prune those channels indexed by [2, 6, 9].
+            # group = DG.get_pruning_group(new_layer.block_3[-1], tp.prune_batchnorm_out_channels, idxs=channels_not_selected)
+            # print(group)
+            # # 3. prune all grouped layers that are coupled with model.conv1 (included).
+            # if DG.check_pruning_group(group): # avoid full pruning, i.e., channels=0.
+            #     # print('hey')
+                # group.prune()
+            # self.model = this_model
+            # group = DG.get_pruning_group(model_final[2].final_5, tp.prune_batchnorm_in_channels, idxs=channels_not_selected)
+            # # 3. prune all grouped layers that are coupled with model.conv1 (included).
+            # print(group)
+            # if DG.check_pruning_group(group): # avoid full pruning, i.e., channels=0.
+            #     # print('hey')
+            #     group.prune()
+            # group = DG.get_pruning_group(model_final[2].final_5, tp.prune_batchnorm_out_channels, idxs=channels_not_selected)
+            # print(group)
+            # if DG.check_pruning_group(group): # avoid full pruning, i.e., channels=0.
+            #     print('hey')
+            #     group.prune()
+            # model_final.to('cuda') #TODO
+            # del self.model
+            # self.model = model_final.to('cuda') #TODO
+            del self.model
+            self.model = torch.nn.Sequential(model_1st, model_2nd_layer_1, new_layer)
+            summary(self.model, depth=5, input_size=(1,3,224,224), col_names=['input_size', 'output_size', 'trainable', 'mult_adds', 'num_params'])
+            # self.model = this_model
             self.init_features()
             def hook_t(module, input, output):
                 self.features.append(output)
-
-            # backbone selection   
-            self.model = model_cutted.to('cuda') #TODO
         
             for param in self.model.parameters():
                 param.requires_grad = False
 
-            # feature map selection
-            self.model[-1][-1].register_forward_hook(hook_t)
+            # # feature map selection
+            self.model[-1].register_forward_hook(hook_t) #
             # self.model.layer3[-1].register_forward_hook(hook_t)
 
-            self.criterion = torch.nn.MSELoss(reduction='sum')
+            # self.criterion = torch.nn.MSELoss(reduction='sum')
 
-            self.init_results_list()
+            # self.init_results_list()
                 
         # Random projection
         if args.coreset_sampling_ratio == 1.0:
@@ -647,7 +727,14 @@ class PatchCore(pl.LightningModule):
         '''
         if self.cuda_active:
             x = x.cuda()
-        return self(x)
+        if False:#self.pruning and (self.reduce_via_entropy or self.reduce_via_std): # TODO
+            # output = self(x)
+            # output = np.array(output[0].cpu())
+            # return torch.from_numpy(np.take(output, self.idx_chosen, axis=1))
+            return [self(x)[0][:,self.idx_chosen,:,:]]
+        else:
+            return self(x)
+            
     
     def feature_embedding(self, features, batch_size_1, batch_size):
         '''
@@ -794,7 +881,7 @@ def get_args():
     parser = argparse.ArgumentParser(description='ANOMALYDETECTION')
     parser.add_argument('--phase', choices=['train','test'], default='train')
     parser.add_argument('--dataset_path', default=r'/mnt/crucial/UNI/IIIT_Muen/MA/MVTechAD')
-    parser.add_argument('--category', default='grid')
+    parser.add_argument('--category', default='own')
     parser.add_argument('--num_epochs', default=1)
     parser.add_argument('--batch_size', default=32)
     parser.add_argument('--load_size', default=224)
