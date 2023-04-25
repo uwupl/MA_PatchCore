@@ -2,6 +2,7 @@ import os
 import glob
 import shutil
 from backbone import Backbone
+from dataset_utilities import MVTecDataset, min_max_norm, heatmap_on_image, cvt2heatmap, distance_matrix, record_gpu
 import numpy as np
 import pandas as pd
 from PIL import Image
@@ -14,7 +15,8 @@ from scipy.ndimage import gaussian_filter
 import torch
 from torch.nn import functional as F
 from torchvision import transforms
-from torch.utils.data import Dataset, DataLoader
+from torch.utils.data import DataLoader
+# from torch.utils.data import Dataset
 import pytorch_lightning as pl
 import faiss
 import pickle
@@ -28,76 +30,6 @@ from torchinfo import summary
 from collections import OrderedDict
 
 
-def record_gpu(cuda_event):
-    '''
-    gpu_measurement
-    '''
-    cuda_event.record()
-    torch.cuda.synchronize()
-    
-    return cuda_event
-
-def distance_matrix(x, y=None, p=2):  # pairwise distance of vectors
-    y = x if type(y) == type(None) else y
-
-    n = x.size(0)
-    m = y.size(0)
-    d = x.size(1)
-
-    x = x.unsqueeze(1).expand(n, m, d)
-    y = y.unsqueeze(0).expand(n, m, d)
-
-    dist = torch.pow(x - y, p).sum(2)
-    return dist
-
-
-class NN():
-    def __init__(self, X=None, Y=None, p=2):
-        self.p = p
-        self.train(X, Y)
-
-    def train(self, X, Y):
-        self.train_pts = X
-        self.train_label = Y
-
-    def __call__(self, x):
-        return self.predict(x)
-
-    def predict(self, x):
-        if type(self.train_pts) == type(None) or type(self.train_label) == type(None):
-            name = self.__class__.__name__
-            raise RuntimeError(f"{name} wasn't trained. Need to execute {name}.train() first")
-
-        dist = distance_matrix(x, self.train_pts, self.p) ** (1 / self.p)
-        labels = torch.argmin(dist, dim=1)
-        return self.train_label[labels]
-
-class KNN(NN):
-    def __init__(self, X=None, Y=None, k=3, p=2):
-        self.k = k
-        super().__init__(X, Y, p)
-
-    def train(self, X, Y):
-        super().train(X, Y)
-        if type(Y) != type(None):
-            self.unique_labels = self.train_label.unique()
-
-    def predict(self, x):
-        dist = torch.cdist(x, self.train_pts, self.p)
-        knn = dist.topk(self.k, largest=False)
-        return knn
-
-def prep_dirs(root):
-    # make embeddings dir
-    embeddings_path = os.path.join('./', 'embeddings', args.category)
-    os.makedirs(embeddings_path, exist_ok=True)
-    # make sample dir
-    sample_path = os.path.join(root, 'sample')
-    os.makedirs(sample_path, exist_ok=True)
-    # make source code record dir & copy
-    source_code_save_path = os.path.join(root, 'src')
-    os.makedirs(source_code_save_path, exist_ok=True)
-    return embeddings_path, sample_path, source_code_save_path
 
 def embedding_concat(x, y):
     '''
@@ -136,80 +68,6 @@ def reshape_embedding(embedding):
 mean_train = [0.485, 0.456, 0.406]
 std_train = [0.229, 0.224, 0.225]
 
-class MVTecDataset(Dataset):
-    def __init__(self, root, transform, gt_transform, phase):
-        if phase=='train':
-            self.img_path = os.path.join(root, 'train')
-        else:
-            self.img_path = os.path.join(root, 'test')
-            self.gt_path = os.path.join(root, 'ground_truth')
-        self.transform = transform
-        self.gt_transform = gt_transform
-        # load dataset
-        self.img_paths, self.gt_paths, self.labels, self.types = self.load_dataset() # self.labels => good : 0, anomaly : 1
-
-    def load_dataset(self):
-
-        img_tot_paths = []
-        gt_tot_paths = []
-        tot_labels = []
-        tot_types = []
-
-        defect_types = os.listdir(self.img_path)
-        
-        for defect_type in defect_types:
-            if defect_type == 'good':
-                img_paths = glob.glob(os.path.join(self.img_path, defect_type) + "/*.png")
-                img_tot_paths.extend(img_paths)
-                gt_tot_paths.extend([0]*len(img_paths))
-                tot_labels.extend([0]*len(img_paths))
-                tot_types.extend(['good']*len(img_paths))
-            else:
-                img_paths = glob.glob(os.path.join(self.img_path, defect_type) + "/*.png")
-                gt_paths = glob.glob(os.path.join(self.gt_path, defect_type) + "/*.png")
-                img_paths.sort()
-                gt_paths.sort()
-                img_tot_paths.extend(img_paths)
-                gt_tot_paths.extend(gt_paths)
-                tot_labels.extend([1]*len(img_paths))
-                tot_types.extend([defect_type]*len(img_paths))
-
-        assert len(img_tot_paths) == len(gt_tot_paths), "Something wrong with test and ground truth pair!"
-        
-        return img_tot_paths, gt_tot_paths, tot_labels, tot_types
-
-    def __len__(self):
-        return len(self.img_paths)
-
-    def __getitem__(self, idx):
-        img_path, gt, label, img_type = self.img_paths[idx], self.gt_paths[idx], self.labels[idx], self.types[idx]
-        img = Image.open(img_path).convert('RGB')
-        img = self.transform(img)
-        if gt == 0:
-            gt = torch.zeros([1, img.size()[-2], img.size()[-2]])
-        else:
-            gt = Image.open(gt)
-            gt = self.gt_transform(gt)
-        
-        assert img.size()[1:] == gt.size()[1:], "image.size != gt.size !!!"
-
-        return img, gt, label, os.path.basename(img_path[:-4]), img_type
-
-def cvt2heatmap(gray):
-    heatmap = cv2.applyColorMap(np.uint8(gray), cv2.COLORMAP_JET)
-    return heatmap
-
-def heatmap_on_image(heatmap, image):
-    if heatmap.shape != image.shape:
-        heatmap = cv2.resize(heatmap, (image.shape[0], image.shape[1]))
-    out = np.float32(heatmap)/255 + np.float32(image)/255
-    out = out / np.max(out)
-    return np.uint8(255 * out)
-
-def min_max_norm(image):
-    a_min, a_max = image.min(), image.max()
-    return (image-a_min)/(a_max - a_min)    
-    
 
 class PatchCore(pl.LightningModule):
     def __init__(self, hparams):
@@ -218,7 +76,7 @@ class PatchCore(pl.LightningModule):
         # options
         self.faiss = True # temp
         self.quantization = False
-        self.measure_inference = False
+        self.measure_inference = True
         self.number_of_reps = 50 # number of reps during measurement. Beacause we can assume a consistent estimator, results get more accurate with more reps
         self.warm_up_reps = 10 # before the actual measurement is done, we execute the process a couple of times without measurement to ensure that there is no influence of initialization and that the circumstances (e.g. thermal state of hardware) are representive.
         self.cuda_active = torch.cuda.is_available()
@@ -232,15 +90,16 @@ class PatchCore(pl.LightningModule):
         self.save_embeddings = False
         self.reduce_via_std = False
         self.reduce_via_entropy = True
-        
-        self.pruning = True
+        self.reduce_via_entropy_normed = False
+        self.pooling_strategy = 'first_trial'
+        self.pruning = False
         
         self.save_hyperparameters(hparams)
         
-        self.model_id = "WRN50"
-        self.layers_needed = [2]
+        self.model_id = "RN18"
+        self.layers_needed = [2]#,3]
         self.layer_cut = True
-        self.prune_output_layer = (False, [2,3])
+        self.prune_output_layer = (False, [])
         
         self.model = Backbone(model_id=self.model_id, layers_needed=self.layers_needed, layer_cut=self.layer_cut, prune_output_layer=self.prune_output_layer)
 
@@ -258,7 +117,6 @@ class PatchCore(pl.LightningModule):
                         transforms.Resize((args.load_size, args.load_size)),
                         transforms.ToTensor(),
                         transforms.CenterCrop(args.input_size)])
-
         self.inv_normalize = transforms.Normalize(mean=[-0.485/0.229, -0.456/0.224, -0.406/0.255], std=[1/0.229, 1/0.224, 1/0.255])
         
         if self.quantization:
@@ -333,7 +191,7 @@ class PatchCore(pl.LightningModule):
             self.features_to_store.append(features[0].detach().cpu())        
         embeddings = []
         for k, feature in enumerate(features):
-            pooled_feature = torch.nn.AvgPool2d(3, 1, 1)(feature)#self.adaptive_pooling(feature)# using AvgPool2d to calculate local-aware features
+            pooled_feature = self.adaptive_pooling(feature)#torch.nn.AvgPool2d(3, 1, 1)(feature)#self.adaptive_pooling(feature)# using AvgPool2d to calculate local-aware features
             # if k in args.feature_map_to_reduce and args.partial_reduction:
             #     org_shape = pooled_feature.shape
             #     pooled_feature = self.partial_reducer.transform(np.reshape(pooled_feature.cpu(), (-1, org_shape[1])))
@@ -359,22 +217,27 @@ class PatchCore(pl.LightningModule):
         
         if self.reduce_via_std:
             percentile_std = 50
-            org_no_channels = total_embeddings.shape[1] # total_embeddings = (200000, 512)
             self.idx_chosen = np.argwhere(np.std(total_embeddings, axis=0)>np.percentile(np.std(total_embeddings,axis=0), percentile_std))[:,0]
             total_embeddings = np.take(total_embeddings, self.idx_chosen, axis=1)#total_embeddings[:,self.idx_with_high_std] # c contigous
-        
-        if self.reduce_via_entropy:
-            percentile_entropy = 95
-            org_no_channels = total_embeddings.shape[1]
+        elif self.reduce_via_entropy:
+            percentile_entropy = 90
             total_embeddings_copy = total_embeddings.copy()
             total_embeddings_copy[total_embeddings_copy<1e-15] = 1e-15
             entropy = -np.sum(total_embeddings_copy*np.log2(total_embeddings_copy), axis=0)#.shape
             self.idx_chosen = np.argwhere(entropy>np.percentile(entropy, percentile_entropy))[:,0]
             total_embeddings = np.take(total_embeddings, self.idx_chosen, axis=1)
+        elif self.reduce_via_entropy_normed:
+            percentile_entropy = 90
+            total_embeddings_copy = total_embeddings.copy()
+            total_embeddings_copy[total_embeddings_copy<1e-15] = 1e-15
+            normed_embeddings = total_embeddings_copy/total_embeddings_copy.sum(axis=1, keepdims=1)
+            entropy = -np.sum(normed_embeddings*np.log2(normed_embeddings), axis=0)#.shape
+            self.idx_chosen = np.argwhere(entropy>np.percentile(entropy, percentile_entropy))[:,0]
+            total_embeddings = np.take(total_embeddings, self.idx_chosen, axis=1)
         if self.save_embeddings:
             file_name_embeddings = input('file name for embeddings:\n')
             np.save(file_name_embeddings + '.npy', total_embeddings)
-        if self.pruning and (self.reduce_via_entropy or self.reduce_via_std):
+        if self.pruning and (self.reduce_via_entropy or self.reduce_via_std or self.reduce_via_entropy_normed):
             print('Pruning ...')        
             self.prune_output_layer = (True, self.idx_chosen)
             self.model = Backbone(model_id=self.model_id, layers_needed=self.layers_needed, layer_cut=self.layer_cut, prune_output_layer=self.prune_output_layer)
@@ -393,7 +256,7 @@ class PatchCore(pl.LightningModule):
                 selected_idx = sampler.select_coreset_idxs()
             
             self.embedding_coreset = total_embeddings[selected_idx]
-        # summary(self.model, depth=5, input_size=(1,3,224,224), col_names=['input_size', 'output_size', 'trainable', 'mult_adds', 'num_params'])   
+        summary(self.model, depth=5, input_size=(1,3,224,224), col_names=['input_size', 'output_size', 'trainable', 'mult_adds', 'num_params'])   
         print('initial embedding size : ', total_embeddings.shape)
         print('final embedding size : ', self.embedding_coreset.shape)
         #faiss
@@ -514,8 +377,7 @@ class PatchCore(pl.LightningModule):
         else:
             x, gt, label, file_name, x_type = batch
             self.eval_one_step_test(score_patches, score, anomaly_map, x, gt, label, file_name, x_type)
-            
-                               
+                             
     def test_step_core(self, batch, measure=False):
         '''
         basically this is one test step where one batch is processed. This func is embedded in the actual def test_step. 
@@ -616,7 +478,6 @@ class PatchCore(pl.LightningModule):
         else:
             return self.model(x)
             
-    
     def feature_embedding(self, features, batch_size_1, batch_size):
         '''
         embedding of features extracted in previous step. Eventually integrates dim reduction and adaptive pooling. 
@@ -628,7 +489,7 @@ class PatchCore(pl.LightningModule):
             # insert dim reduction here TODO 
             # before pooling
             ####
-            pooled_features = torch.nn.AvgPool2d(3, 1, 1)(feature) # TODO replace with adaptive pooling
+            pooled_features = self.adaptive_pooling(feature)#torch.nn.AvgPool2d(3, 1, 1)(feature) # TODO replace with adaptive pooling
             ####
             # insert dim reduction here TODO 
             # after pooling
@@ -643,7 +504,7 @@ class PatchCore(pl.LightningModule):
         else:
             flattened_features = np.array([np.array(reshape_embedding(np.array(concatenated_features[k,...].unsqueeze(0)))) for k in range(batch_size)])
         
-        if (self.reduce_via_std or self.reduce_via_entropy) and not self.pruning:
+        if (self.reduce_via_std or self.reduce_via_entropy or self.reduce_via_entropy_normed) and not self.pruning:
             return np.take(flattened_features, self.idx_chosen, axis=1)#indices=#[:,self.idx_with_high_std]
         else:
             return flattened_features
@@ -757,12 +618,43 @@ class PatchCore(pl.LightningModule):
                         embeddings_result = embedding_concat(embeddings_result, embeddings[k+1].cpu())
         return embeddings_result
 
+    def adaptive_pooling(self, feature):
+        '''
+        depending on input size and strategy, different pooling methods are applied for each layer.
+        '''
+        spatial_dim = feature.shape[3]
+        
+        if self.pooling_strategy.__contains__('default'):
+            pool = torch.nn.AvgPool2d(3, 1, 1)
+        
+        elif self.pooling_strategy.__contains__('first_trial'):
+            # everything to 7x7 with 224 input size
+            if spatial_dim == 56:  # TODO --> adapt depeding in input size of pic
+                pool = torch.nn.AvgPool2d(kernel_size=8, stride=4, padding=4)
+            elif spatial_dim == 28:
+                pool = torch.nn.AvgPool2d(kernel_size=4, stride=2, padding=2)
+            elif spatial_dim == 14:
+                pool = torch.nn.AvgPool2d(kernel_size=2, stride=1, padding=1)
+            elif spatial_dim == 7:
+                pool = torch.nn.AvgPool2d(kernel_size=1, stride=1, padding=1)#
+        elif self.pooling_strategy.__contains__('second_trial'):
+            if spatial_dim == 56:  # TODO --> adapt depeding in input size of pic
+                pool = torch.nn.AvgPool2d(kernel_size=8, stride=4, padding=2)
+            elif spatial_dim == 28:
+                pool = torch.nn.AvgPool2d(kernel_size=4, stride=2, padding=1)
+            elif spatial_dim == 14:
+                pool = torch.nn.AvgPool2d(kernel_size=2, stride=1, padding=0)
+            elif spatial_dim == 7:
+                pool = torch.nn.Identity()#
+            
+        return pool(feature) 
+                                    
 def get_args():
     import argparse
     parser = argparse.ArgumentParser(description='ANOMALYDETECTION')
     parser.add_argument('--phase', choices=['train','test'], default='train')
     parser.add_argument('--dataset_path', default=r'/mnt/crucial/UNI/IIIT_Muen/MA/MVTechAD')
-    parser.add_argument('--category', default='pill')
+    parser.add_argument('--category', default='own')
     parser.add_argument('--num_epochs', default=1)
     parser.add_argument('--batch_size', default=32)
     parser.add_argument('--load_size', default=224)
@@ -774,6 +666,20 @@ def get_args():
     parser.add_argument('--n_neighbors', type=int, default=9)
     args = parser.parse_args()
     return args
+
+def prep_dirs(root):
+    # make embeddings dir
+    embeddings_path = os.path.join('./', 'embeddings', args.category)
+    os.makedirs(embeddings_path, exist_ok=True)
+    # make sample dir
+    sample_path = os.path.join(root, 'sample')
+    os.makedirs(sample_path, exist_ok=True)
+    # make source code record dir & copy
+    source_code_save_path = os.path.join(root, 'src')
+    os.makedirs(source_code_save_path, exist_ok=True)
+    return embeddings_path, sample_path, source_code_save_path
+
+
 
 if __name__ == '__main__':
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
