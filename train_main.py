@@ -3,6 +3,7 @@ import glob
 import shutil
 from backbone import Backbone
 from dataset_utilities import MVTecDataset, min_max_norm, heatmap_on_image, cvt2heatmap, distance_matrix, record_gpu
+from search import KNN, NN
 import numpy as np
 import pandas as pd
 from PIL import Image
@@ -74,7 +75,8 @@ class PatchCore(pl.LightningModule):
         super(PatchCore, self).__init__()
         
         # options
-        self.faiss = True # temp
+        self.faiss = False # temp
+        self.own_knn = True
         self.quantization = False
         self.measure_inference = True
         self.number_of_reps = 50 # number of reps during measurement. Beacause we can assume a consistent estimator, results get more accurate with more reps
@@ -97,7 +99,7 @@ class PatchCore(pl.LightningModule):
         self.save_hyperparameters(hparams)
         
         self.model_id = "RN18"
-        self.layers_needed = [1,2,3]#,3]
+        self.layers_needed = [2]#,3]
         self.layer_cut = True
         self.prune_output_layer = (False, [])
         
@@ -178,8 +180,8 @@ class PatchCore(pl.LightningModule):
             if self.cuda_active:
                 res = faiss.StandardGpuResources()
                 self.index = faiss.index_cpu_to_gpu(res, 0 ,self.index)
-        elif False:
-            self.knn = KNN(torch.from_numpy(self.embedding_coreset).cuda(), k=9)
+        elif self.own_knn:
+            self.knn = KNN(torch.from_numpy(self.embedding_coreset), k=9) #.cuda()
         else:
             self.nbrs = NearestNeighbors(n_neighbors=args.n_neighbors, algorithm='ball_tree', metric='minkowski', p=2).fit(self.embedding_coreset)
         self.init_results_list()
@@ -519,15 +521,15 @@ class PatchCore(pl.LightningModule):
         if batch_size_1:
             if self.faiss:
                 score_patches, _ = self.index.search(embeddings , k=args.n_neighbors)
-            elif False:
-                score_patches = self.knn(torch.from_numpy(embeddings).cuda())[0].cpu().detach().numpy()
+            elif self.own_knn:
+                score_patches = self.knn(torch.from_numpy(embeddings))[0].cpu().detach().numpy() # .cuda()
             else:
                 score_patches, _ = self.nbrs.kneighbors(embeddings)
         else:
             if self.faiss:
                 score_patches = [self.index.search(element, k=args.n_neighbors)[0] for element in embeddings]
-            elif False:
-                score_patches = [self.knn(torch.from_numpy(element).cuda()[0].cpu().detach().numpy()) for element in embeddings]
+            elif self.own_knn:
+                score_patches = [self.knn(torch.from_numpy(element)[0].cpu().detach().numpy()) for element in embeddings] #.cuda()
             else:
                 score_patches = [self.nbrs.kneighbors(element) for element in embeddings]
         
