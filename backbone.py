@@ -59,13 +59,25 @@ class Backbone(nn.Module):
     
     def hook_WideResNet(self, module, input, output):
         '''
-        takes the model and prune it if desired. Mainly, hooks are placed here. 
+        takes the model and prune it if desired. Mainly, hooks are placed here. For Nets with Bottleneck, the hook is placed at the end of the Bottleneck.
         '''
         if output.shape[1] == int(256):
             selected_idx = self.selected_idx_dict[1]
         elif output.shape[1] == int(512):
             selected_idx = self.selected_idx_dict[2]
         elif output.shape[1] == int(1024):
+            selected_idx = self.selected_idx_dict[3]
+        self.features.append(output[:,selected_idx,:,:])
+
+    def hook_ResNet(self, module, input, output):
+        '''
+        takes the model and prune it if desired. Mainly, hooks are placed here. For Nets with BasciBlock.
+        '''
+        if output.shape[1] == int(64):
+            selected_idx = self.selected_idx_dict[1]
+        elif output.shape[1] == int(128):
+            selected_idx = self.selected_idx_dict[2]
+        elif output.shape[1] == int(256):
             selected_idx = self.selected_idx_dict[3]
         self.features.append(output[:,selected_idx,:,:])
 
@@ -89,13 +101,13 @@ class Backbone(nn.Module):
                 self.model.layer3[-1].register_forward_hook(self.hook_t)
             if int(4) in self.layers_needed:
                 self.model.layer4[-1].register_forward_hook(self.hook_t)
-        elif self.prune_output_layer:
+        elif self.prune_output_layer and self.model_id.__contains__('W'):
             layer_to_include = max(self.layers_needed)
             selected_idx_list = self.prune_output_layer[1]
             if len(self.layers_needed) > 1:
                 # def hook_adapted(module, input, output)
                 self.selected_idx_dict = {layer: [] for layer in self.layers_needed}
-                current_boundary = 2**int(7+min(self.layers_needed))
+                current_boundary = 2**int(7+min(self.layers_needed)) # 1st: 256, 2nd: 512, 3rd: 1024, 4th: 2048
                 to_subtract = int(0)
                 for k, layer in enumerate(self.layers_needed):
                     if k > 0:
@@ -129,7 +141,46 @@ class Backbone(nn.Module):
             if len(self.layers_needed) > 1:
                 for layer in self.layers_needed[:-1]:
                     list(self.model.children())[0][layer+3][-1].register_forward_hook(self.hook_WideResNet)
-            self.model[-1].register_forward_hook(self.hook_t)        
+            self.model[-1].register_forward_hook(self.hook_t)
+        
+        elif self.prune_output_layer and not self.model_id.__contains__('W'):
+            layer_to_include = max(self.layers_needed)
+            selected_idx_list = self.prune_output_layer[1]
+            if len(self.layers_needed) > 1:
+                # def hook_adapted(module, input, output)
+                self.selected_idx_dict = {layer: [] for layer in self.layers_needed}
+                current_boundary = 2**int(5+min(self.layers_needed)) # for resnet18: 1st: 64, 2nd: 128, 3rd: 256, 4th: 512
+                to_subtract = int(0)
+                for k, layer in enumerate(self.layers_needed):
+                    if k > 0:
+                        to_subtract = current_boundary
+                        current_boundary += 2**int(5+layer)
+                    self.selected_idx_dict[layer] += [int(channel-to_subtract) for channel in selected_idx_list if channel < current_boundary]
+                    selected_idx_list = [channel for channel in selected_idx_list if int(channel-to_subtract) not in self.selected_idx_dict[layer]]
+            layers_1 = torch.nn.Sequential(*(list(self.model.children())[:int(4+layer_to_include-1)]))
+            layers_2 = torch.nn.Sequential(*(list(self.model.children())[int(4+layer_to_include-1)][:-1]))
+            output_layer_tmp = torch.nn.Sequential(*(list(self.model.children())[int(4+layer_to_include-1)][-1:]))
+            dict_1 = OrderedDict([(f'final_{i}', module) for i, module in enumerate(output_layer_tmp[-1].children()) if i<3])
+            dict_2 = OrderedDict([(f'final_{i}', module) for i, module in enumerate(output_layer_tmp[-1].children()) if i>=3])
+            if layer_to_include == int(1):
+                input_size = (1,64,56,56)
+            elif layer_to_include == int(2):
+                input_size = (1,128,28,28)
+            elif layer_to_include == int(3):
+                input_size = (1,256,14,14)
+            elif layer_to_include == int(4):
+                input_size = (1,512,7,7)
+            if len(self.layers_needed) > 1:
+                output_layer = OwnBasicblock(dict_1, dict_2, self.selected_idx_dict[max(self.layers_needed)], input_size)
+            else:
+                output_layer = OwnBasicblock(dict_1, dict_2, self.prune_output_layer[1], input_size)
+            del self.model
+            self.model = nn.Sequential(layers_1, layers_2, output_layer)
+            
+            if len(self.layers_needed) > 1:
+                for layer in self.layers_needed[:-1]:
+                    list(self.model.children())[0][layer+3][-1].register_forward_hook(self.hook_ResNet)
+            self.model[-1].register_forward_hook(self.hook_t)
 
     def procedure_convnext(self):
         if self.layer_cut and not self.prune_output_layer[0]:
@@ -194,4 +245,30 @@ class OwnBottleneck(torch.nn.Module):
         out += identity
         out = self.relu(out)
                 
+        return out
+    
+class OwnBasicblock(torch.nn.Module):
+    def __init__(self, block_1, block_2, idx_selected, input_size):
+        '''
+        just pass OderedDicts, bottleneck like layer is created. For ResNet with Basicblocks. 
+        '''
+        super().__init__()
+        self.block_1 = torch.nn.Sequential(block_1)
+        self.block_2 = torch.nn.Sequential(block_2)
+        self.relu = torch.nn.ReLU(inplace=True)
+        self.idx_selected = idx_selected
+        channels_not_selected = [i for i in range(input_size[1]) if i not in self.idx_selected]
+        DG = tp.DependencyGraph().build_dependency(self.block_2, example_inputs=torch.rand(input_size))
+        group = DG.get_pruning_group(self.block_2.final_3, tp.prune_conv_out_channels, idxs=channels_not_selected)
+        print(group)
+        if DG.check_pruning_group(group): # avoid full pruning, i.e., channels=0.  
+            group.prune()
+        
+    def forward(self, x):
+        identity = x
+        out = self.block_1(x)
+        out = self.block_2(out)
+        identity = identity[:,self.idx_selected,...]
+        out += identity
+        out = self.relu(out)
         return out

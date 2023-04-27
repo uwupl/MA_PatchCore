@@ -79,7 +79,7 @@ class PatchCore(pl.LightningModule):
         self.measure_inference = True
         self.number_of_reps = 50 # number of reps during measurement. Beacause we can assume a consistent estimator, results get more accurate with more reps
         self.warm_up_reps = 10 # before the actual measurement is done, we execute the process a couple of times without measurement to ensure that there is no influence of initialization and that the circumstances (e.g. thermal state of hardware) are representive.
-        self.cuda_active = torch.cuda.is_available()
+        self.cuda_active = False#torch.cuda.is_available()
         self.dim_reduction = False
         self.log_file_name = f'trial_{int(time.time())}.csv'
         self.save_am = False
@@ -92,12 +92,12 @@ class PatchCore(pl.LightningModule):
         self.reduce_via_entropy = True
         self.reduce_via_entropy_normed = False
         self.pooling_strategy = 'first_trial'
-        self.pruning = False
+        self.pruning = True
         
         self.save_hyperparameters(hparams)
         
         self.model_id = "RN18"
-        self.layers_needed = [2]#,3]
+        self.layers_needed = [1,2,3]#,3]
         self.layer_cut = True
         self.prune_output_layer = (False, [])
         
@@ -175,7 +175,7 @@ class PatchCore(pl.LightningModule):
         self.embedding_dir_path, self.sample_path, self.source_code_save_path = prep_dirs(self.logger.log_dir)
         if self.faiss:
             self.index = faiss.read_index(os.path.join(self.embedding_dir_path,'index.faiss'))
-            if torch.cuda.is_available():
+            if self.cuda_active:
                 res = faiss.StandardGpuResources()
                 self.index = faiss.index_cpu_to_gpu(res, 0 ,self.index)
         elif False:
@@ -256,7 +256,7 @@ class PatchCore(pl.LightningModule):
                 selected_idx = sampler.select_coreset_idxs()
             
             self.embedding_coreset = total_embeddings[selected_idx]
-        summary(self.model, depth=5, input_size=(1,3,224,224), col_names=['input_size', 'output_size', 'trainable', 'mult_adds', 'num_params'])   
+        # summary(self.model, depth=5, input_size=(1,3,224,224), col_names=['input_size', 'output_size', 'trainable', 'mult_adds', 'num_params'])   
         print('initial embedding size : ', total_embeddings.shape)
         print('final embedding size : ', self.embedding_coreset.shape)
         #faiss
@@ -402,7 +402,7 @@ class PatchCore(pl.LightningModule):
             ############################################################
             # INITIALIZE MEASUREMENT UTILS
             # initialize cuda events
-            if torch.cuda.is_available():
+            if self.cuda_active:
                 t_0_gpu, t_1_gpu, t_2_gpu, t_3_gpu, t_4_gpu = torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable_timing=True)
             else:
                 t_0_gpu, t_1_gpu, t_2_gpu, t_3_gpu, t_4_gpu = None, None, None, None, None
@@ -436,7 +436,8 @@ class PatchCore(pl.LightningModule):
             ############################################################
             # NN SEARCH // SCORE PATCHES
             t_2_cpu = record_cpu()
-            t_2_gpu = record_gpu(t_2_gpu)
+            if self.cuda_active:
+                t_2_gpu = record_gpu(t_2_gpu)
             
             score_patches = self.calc_score_patches(embeddings=embeddings, batch_size_1=batch_size_1)
             # NN SEARCH // SCORE PATCHES
@@ -445,7 +446,8 @@ class PatchCore(pl.LightningModule):
             ############################################################
             # IMG LEVEL SCORE
             t_3_cpu = record_cpu()
-            t_3_gpu = record_gpu(t_3_gpu)
+            if self.cuda_active:
+                t_3_gpu = record_gpu(t_3_gpu)
 
             score = self.calc_img_score(score_patches=score_patches)
             # IMG LEVEL SCORE
@@ -454,7 +456,8 @@ class PatchCore(pl.LightningModule):
             ############################################################
             # AMOMALY MAP
             t_4_cpu = record_cpu()
-            t_4_gpu = record_gpu(t_4_gpu)
+            if self.cuda_active:
+                t_4_gpu = record_gpu(t_4_gpu)
             if not self.only_img_lvl:
                 anomaly_map = self.calc_anomaly_map(score_patches=score_patches, batch_size_1=batch_size_1)
             else:
@@ -682,9 +685,9 @@ def prep_dirs(root):
 
 
 if __name__ == '__main__':
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    device = torch.device("cpu")#"cuda" if torch.cuda.is_available() else "cpu")
     args = get_args()
-    trainer = pl.Trainer.from_argparse_args(args, default_root_dir=os.path.join(args.project_root_path, args.category), max_epochs=args.num_epochs, gpus=1)
+    trainer = pl.Trainer.from_argparse_args(args, default_root_dir=os.path.join(args.project_root_path, args.category), max_epochs=args.num_epochs, gpus=0)
     model = PatchCore(hparams=args)
     if args.phase == 'train':
         trainer.fit(model)
