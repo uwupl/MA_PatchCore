@@ -6,6 +6,7 @@ from dataset_utilities import MVTecDataset, min_max_norm, heatmap_on_image, cvt2
 from search import KNN, NN
 import numpy as np
 import pandas as pd
+import numba as nb
 from PIL import Image
 import cv2
 
@@ -30,7 +31,9 @@ from anomalib.models.components.sampling import k_center_greedy
 from torchinfo import summary
 from collections import OrderedDict
 
-
+#imagenet
+mean_train = [0.485, 0.456, 0.406]
+std_train = [0.229, 0.224, 0.225]
 
 def embedding_concat(x, y):
     '''
@@ -52,7 +55,7 @@ def embedding_concat(x, y):
     z = F.fold(z, kernel_size=s, output_size=(H1, W1), stride=s)
     return z
 
-def reshape_embedding(embedding):
+def reshape_embedding_old(embedding):
     '''
     flattens spatial dimensions and concatenates channels. Results in 1D-Vector
     
@@ -63,12 +66,53 @@ def reshape_embedding(embedding):
         for i in range(embedding.shape[2]):
             for j in range(embedding.shape[3]):
                 embedding_list.append(embedding[k, :, i, j])
-    return embedding_list
+    return np.array(embedding_list)
 
-#imagenet
-mean_train = [0.485, 0.456, 0.406]
-std_train = [0.229, 0.224, 0.225]
+@nb.njit
+def reshape_embedding(embedding):
+    '''
+    flattens spatial dimensions and concatenates channels. Results in 1D-Vector
+    '''
+    # embeddings = np.empty((embedding.shape[0]*embedding.shape[2]*embedding.shape[3], embedding.shape[1]))
+    # out = np.reshape(embedding, (embedding.shape[0]*embedding.shape[2]*embedding.shape[3], embedding.shape[1]))
+    out = np.empty(shape=(embedding.shape[0]*embedding.shape[2]*embedding.shape[3], embedding.shape[1]), dtype=np.float32) # TODO: dtype?
+    counter = int(0)
+    for k in range(embedding.shape[0]):
+        for i in range(embedding.shape[2]):
+            for j in range(embedding.shape[3]):
+                out[counter, :] = embedding[k, :, i, j]
+                counter += 1
+    return out
+                                  
+@nb.jit(nopython=True)
+def modified_kNN_score_calc_old(score_patches):
+    k = score_patches.shape[1]
+    weights = np.divide(np.array([k-i for i in range(k)]), 1)#((k-1)*k)/2)
+    # weights = np.ones(k)
+    dists = np.sum(np.multiply(score_patches, weights), axis=1)
+    N_b = score_patches[np.argmax(dists)]
+    w = (1 - (np.max(np.exp(N_b))/np.sum(np.exp(N_b))))
+    score = w*np.max(dists)
+    return score
 
+# @nb.jit(nopython=True)
+def modified_kNN_score_calc(score_patches):
+    k = score_patches.shape[1]
+    l = 10
+    # weights = np.divide(np.array([(k-i) for i in range(k)]), ((k-1)*k)/2)
+    # weights = np.ones(k)
+    # weights = np.zeros(k)
+    # weights[0] = 1
+    score_patches = score_patches.astype(np.float64)
+    weights = np.divide(np.array([(k-i)**2 for i in range(k)]), 1, dtype=np.float64) # Summe(i²) = (k*(k+1)*(2*k+1))/6
+    dists = np.sum(np.multiply(score_patches, weights), axis=1, dtype=np.float64)
+    sorted_args = np.argsort(dists)
+    score = np.zeros(l)
+    for p in range(1,l+1):    
+        N_b = score_patches[sorted_args[-p]]
+        w = (1 - (np.max(np.exp(N_b))/np.sum(np.exp(N_b))))
+        score[p-1] =  w*dists[sorted_args[-p]]
+    return np.mean(score)
 
 class PatchCore(pl.LightningModule):
     def __init__(self, hparams):
@@ -76,12 +120,15 @@ class PatchCore(pl.LightningModule):
         
         # options
         self.faiss = False # temp
+        self.adapted_score_calc = True
         self.own_knn = True
+        self.normalize = True
         self.quantization = False
-        self.measure_inference = True
+        self.measure_inference = False
         self.number_of_reps = 50 # number of reps during measurement. Beacause we can assume a consistent estimator, results get more accurate with more reps
         self.warm_up_reps = 10 # before the actual measurement is done, we execute the process a couple of times without measurement to ensure that there is no influence of initialization and that the circumstances (e.g. thermal state of hardware) are representive.
         self.cuda_active = False#torch.cuda.is_available()
+        self.cuda_active_training = True
         self.dim_reduction = False
         self.log_file_name = f'trial_{int(time.time())}.csv'
         self.save_am = False
@@ -90,20 +137,21 @@ class PatchCore(pl.LightningModule):
         if self.save_features:
             self.features_to_store = []
         self.save_embeddings = False
-        self.reduce_via_std = False
-        self.reduce_via_entropy = True
+        self.reduce_via_std = True
+        self.reduce_via_entropy = False
         self.reduce_via_entropy_normed = False
         self.pooling_strategy = 'first_trial'
-        self.pruning = True
         
         self.save_hyperparameters(hparams)
         
         self.model_id = "RN18"
-        self.layers_needed = [2]#,3]
+        self.layers_needed = [2]#,3]#,3]
         self.layer_cut = True
-        self.prune_output_layer = (False, [])
+        self.prune_output_layer = (True, [])
         
-        self.model = Backbone(model_id=self.model_id, layers_needed=self.layers_needed, layer_cut=self.layer_cut, prune_output_layer=self.prune_output_layer)
+        self.model = Backbone(model_id=self.model_id, layers_needed=self.layers_needed, layer_cut=self.layer_cut, prune_output_layer=(False, []))
+        if self.quantization:
+            self.model = self.model.half()
 
         self.criterion = torch.nn.MSELoss(reduction='sum')
 
@@ -156,12 +204,12 @@ class PatchCore(pl.LightningModule):
         cv2.imwrite(os.path.join(self.sample_path, f'{x_type}_{file_name}_gt.jpg'), gt_img)
 
     def train_dataloader(self):
-        image_datasets = MVTecDataset(root=os.path.join(args.dataset_path,args.category), transform=self.data_transforms, gt_transform=self.gt_transforms, phase='train')
-        train_loader = DataLoader(image_datasets, batch_size=args.batch_size, shuffle=True, num_workers=0)
+        image_datasets = MVTecDataset(root=os.path.join(args.dataset_path,args.category), transform=self.data_transforms, gt_transform=self.gt_transforms, phase='train', half=self.quantization)
+        train_loader = DataLoader(image_datasets, batch_size=args.batch_size, shuffle=True, num_workers=12)
         return train_loader
 
     def test_dataloader(self):
-        test_datasets = MVTecDataset(root=os.path.join(args.dataset_path,args.category), transform=self.data_transforms, gt_transform=self.gt_transforms, phase='test')
+        test_datasets = MVTecDataset(root=os.path.join(args.dataset_path,args.category), transform=self.data_transforms, gt_transform=self.gt_transforms, phase='test', half=self.quantization)
         test_loader = DataLoader(test_datasets, batch_size=1, shuffle=False, num_workers=0)
         return test_loader
 
@@ -171,7 +219,7 @@ class PatchCore(pl.LightningModule):
     def on_train_start(self):
         self.model.eval() # to stop running_var move (maybe not critical)        
         self.embedding_dir_path, self.sample_path, self.source_code_save_path = prep_dirs(self.logger.log_dir)
-        self.embedding_list = []
+        self.embedding_np = np.array([])
     
     def on_test_start(self):
         self.embedding_dir_path, self.sample_path, self.source_code_save_path = prep_dirs(self.logger.log_dir)
@@ -181,7 +229,7 @@ class PatchCore(pl.LightningModule):
                 res = faiss.StandardGpuResources()
                 self.index = faiss.index_cpu_to_gpu(res, 0 ,self.index)
         elif self.own_knn:
-            self.knn = KNN(torch.from_numpy(self.embedding_coreset), k=9) #.cuda()
+            self.knn = KNN(torch.from_numpy(self.embedding_coreset), k=args.n_neighbors) #.cuda()
         else:
             self.nbrs = NearestNeighbors(n_neighbors=args.n_neighbors, algorithm='ball_tree', metric='minkowski', p=2).fit(self.embedding_coreset)
         self.init_results_list()
@@ -201,8 +249,11 @@ class PatchCore(pl.LightningModule):
             #     if not pooled_feature.device.__str__().__contains__(self.accelerator):
             #         pooled_feature = pooled_feature.to(self.accelerator)
             embeddings.append(pooled_feature)
-        embedding = self.embedding_concat_frame(embeddings=embeddings) # shape (batch, 448, 16, 16) --> default
-        self.embedding_list.extend(reshape_embedding(np.array(embedding)))
+        embedding = embedding_concat_frame(embeddings=embeddings, cuda_active=self.cuda_active) # shape (batch, 448, 16, 16) --> default
+        if batch_idx == int(0):
+            self.embedding_np = reshape_embedding(np.array(embedding))
+        else:
+            self.embedding_np = np.append(self.embedding_np, reshape_embedding(np.array(embedding)), axis=0)#.extend(reshape_embedding(np.array(embedding)))
             
     def training_epoch_end(self, outputs):
         if self.save_features:
@@ -215,31 +266,39 @@ class PatchCore(pl.LightningModule):
                     feature_save = np.append(feature_save, np.expand_dims(l.cpu().numpy(), axis=0), axis=0)
             print(feature_save.shape)
             np.save(file_name_features + '.npy', feature_save)
-        total_embeddings = np.array(self.embedding_list)
-        
+        # total_embeddings = np.array(self.embedding_list)
+        total_embeddings = self.embedding_np
+
         if self.reduce_via_std:
-            percentile_std = 50
-            self.idx_chosen = np.argwhere(np.std(total_embeddings, axis=0)>np.percentile(np.std(total_embeddings,axis=0), percentile_std))[:,0]
+            percentile_std = 12.5*2
+            self.idx_chosen = np.argwhere(np.std(total_embeddings, axis=0)<np.percentile(np.std(total_embeddings,axis=0), percentile_std))[:,0]
             total_embeddings = np.take(total_embeddings, self.idx_chosen, axis=1)#total_embeddings[:,self.idx_with_high_std] # c contigous
-        elif self.reduce_via_entropy:
-            percentile_entropy = 90
+        if self.normalize:
+            self.mean = np.mean(total_embeddings, axis=0)
+            self.std = np.std(total_embeddings, axis=0)
+            total_embeddings = (total_embeddings-self.mean)/self.std
+        if self.reduce_via_entropy:
+            percentile_entropy = 100-12.5*2
             total_embeddings_copy = total_embeddings.copy()
             total_embeddings_copy[total_embeddings_copy<1e-15] = 1e-15
             entropy = -np.sum(total_embeddings_copy*np.log2(total_embeddings_copy), axis=0)#.shape
             self.idx_chosen = np.argwhere(entropy>np.percentile(entropy, percentile_entropy))[:,0]
             total_embeddings = np.take(total_embeddings, self.idx_chosen, axis=1)
         elif self.reduce_via_entropy_normed:
-            percentile_entropy = 90
+            percentile_entropy = 100-12.5*2
             total_embeddings_copy = total_embeddings.copy()
             total_embeddings_copy[total_embeddings_copy<1e-15] = 1e-15
             normed_embeddings = total_embeddings_copy/total_embeddings_copy.sum(axis=1, keepdims=1)
             entropy = -np.sum(normed_embeddings*np.log2(normed_embeddings), axis=0)#.shape
             self.idx_chosen = np.argwhere(entropy>np.percentile(entropy, percentile_entropy))[:,0]
             total_embeddings = np.take(total_embeddings, self.idx_chosen, axis=1)
+        if (self.reduce_via_entropy or self.reduce_via_entropy_normed) and self.normalize and not self.reduce_via_std:
+            self.std = np.take(self.std, self.idx_chosen)#, axis=0)
+            self.mean = np.take(self.mean, self.idx_chosen)#, axis=0)
         if self.save_embeddings:
             file_name_embeddings = input('file name for embeddings:\n')
             np.save(file_name_embeddings + '.npy', total_embeddings)
-        if self.pruning and (self.reduce_via_entropy or self.reduce_via_std or self.reduce_via_entropy_normed):
+        if self.prune_output_layer[0] and (self.reduce_via_entropy or self.reduce_via_std or self.reduce_via_entropy_normed):
             print('Pruning ...')        
             self.prune_output_layer = (True, self.idx_chosen)
             self.model = Backbone(model_id=self.model_id, layers_needed=self.layers_needed, layer_cut=self.layer_cut, prune_output_layer=self.prune_output_layer)
@@ -254,7 +313,11 @@ class PatchCore(pl.LightningModule):
                 selector = kCenterGreedy(total_embeddings,0,0)
                 selected_idx = selector.select_batch(model=self.randomprojector, already_selected=[], N=int(total_embeddings.shape[0]*args.coreset_sampling_ratio))
             else:
-                sampler = k_center_greedy.KCenterGreedy(embedding=torch.from_numpy(total_embeddings), sampling_ratio=float(args.coreset_sampling_ratio))
+                # total_embeddings_copy = total_embeddings.astype(np.float32)
+                if self.cuda_active or self.cuda_active_training:
+                    sampler = k_center_greedy.KCenterGreedy(embedding=torch.from_numpy(total_embeddings).cuda(), sampling_ratio=float(args.coreset_sampling_ratio))
+                else:
+                    sampler = k_center_greedy.KCenterGreedy(embedding=torch.from_numpy(total_embeddings), sampling_ratio=float(args.coreset_sampling_ratio))
                 selected_idx = sampler.select_coreset_idxs()
             
             self.embedding_coreset = total_embeddings[selected_idx]
@@ -263,9 +326,21 @@ class PatchCore(pl.LightningModule):
         print('final embedding size : ', self.embedding_coreset.shape)
         #faiss
         if self.faiss:
-            self.index = faiss.IndexFlatL2(self.embedding_coreset.shape[1])
-            self.index.add(self.embedding_coreset) 
-            faiss.write_index(self.index,  os.path.join(self.embedding_dir_path,'index.faiss'))
+            if False:
+                nlist = 20 if self.embedding_coreset.shape[0] > 20 else self.embedding_coreset.shape[0]
+                n_probe = 5 # defaul 1
+                quantizer = faiss.IndexFlatL2(self.embedding_coreset.shape[1])
+                self.index = faiss.IndexIVFFlat(quantizer, self.embedding_coreset.shape[1], nlist, faiss.METRIC_L2)
+                assert not self.index.is_trained
+                self.index.train(self.embedding_coreset)
+                assert self.index.is_trained
+                self.index.add(self.embedding_coreset)
+                self.index.nprobe = n_probe
+                faiss.write_index(self.index,  os.path.join(self.embedding_dir_path,'index.faiss'))
+            else:
+                self.index = faiss.IndexFlatL2(self.embedding_coreset.shape[1])
+                self.index.add(self.embedding_coreset) 
+                faiss.write_index(self.index,  os.path.join(self.embedding_dir_path,'index.faiss'))
         else:
             with open(os.path.join(self.embedding_dir_path, 'embedding.pickle'), 'wb') as f:
                 pickle.dump(self.embedding_coreset, f)
@@ -501,18 +576,20 @@ class PatchCore(pl.LightningModule):
             ####
             selected_features.append(pooled_features)
         
-        concatenated_features = self.embedding_concat_frame(embeddings=selected_features)
-            
+        concatenated_features = embedding_concat_frame(embeddings=selected_features, cuda_active=self.cuda_active)
         
         if batch_size_1:
             flattened_features = np.array(reshape_embedding(np.array(concatenated_features)))
         else:
             flattened_features = np.array([np.array(reshape_embedding(np.array(concatenated_features[k,...].unsqueeze(0)))) for k in range(batch_size)])
         
-        if (self.reduce_via_std or self.reduce_via_entropy or self.reduce_via_entropy_normed) and not self.pruning:
-            return np.take(flattened_features, self.idx_chosen, axis=1)#indices=#[:,self.idx_with_high_std]
-        else:
-            return flattened_features
+        if (self.reduce_via_std or self.reduce_via_entropy or self.reduce_via_entropy_normed) and not self.prune_output_layer[0]:
+            flattened_features = np.take(flattened_features, self.idx_chosen, axis=1)#indices=#[:,self.idx_with_high_std]
+        
+        if self.normalize:
+            flattened_features = (flattened_features - self.mean) / self.std
+            
+        return flattened_features
         
     def calc_score_patches(self, embeddings, batch_size_1):
         '''
@@ -539,9 +616,12 @@ class PatchCore(pl.LightningModule):
         '''
         calculates the image score based on score_patches
         '''
-        N_b = score_patches[np.argmax(score_patches[:,0])]
-        w = (1 - (np.max(np.exp(N_b))/np.sum(np.exp(N_b))))
-        score = w*max(score_patches[:,0]) # Image-level score #TODO --> meaning of numbers
+        if self.adapted_score_calc:
+            score = modified_kNN_score_calc(score_patches=score_patches)
+        else:
+            N_b = score_patches[np.argmax(score_patches[:,0])] # only the closest val is relevant for selection! # this changes with adapted version.
+            w = (1 - (np.max(np.exp(N_b))/np.sum(np.exp(N_b))))
+            score = w*max(score_patches[:,0]) # Image-level score #TODO --> meaning of numbers
         return score
     
     def calc_anomaly_map(self, score_patches, batch_size_1):
@@ -602,27 +682,6 @@ class PatchCore(pl.LightningModule):
             pd_run_times.to_csv(os.path.join(os.path.dirname(__file__), "results", "csv",self.log_file_name))
             print(f'\n\nMEAN INFERENCE TIME: {pd_run_times["#11 whole process cpu"].mean()} ms\n')
 
-    def embedding_concat_frame(self, embeddings):
-        '''
-        framework for concatenating more than two features or less than two
-        '''
-        no_of_embeddings = len(embeddings)
-        if no_of_embeddings == int(1):
-            embeddings_result = embeddings[0].cpu()
-        elif no_of_embeddings == int(2):
-            embeddings_result = embedding_concat(embeddings[0], embeddings[1])
-        elif no_of_embeddings > int(2):
-            for k in range(no_of_embeddings - 1):
-                if k == int(0):
-                    embeddings_result = embedding_concat(embeddings[0], embeddings[1]) # default
-                    pass
-                else:
-                    if torch.cuda.is_available() and self.cuda_active:
-                        embeddings_result = embedding_concat(embeddings_result.cuda(), embeddings[k+1])
-                    else:
-                        embeddings_result = embedding_concat(embeddings_result, embeddings[k+1].cpu())
-        return embeddings_result
-
     def adaptive_pooling(self, feature):
         '''
         depending on input size and strategy, different pooling methods are applied for each layer.
@@ -653,22 +712,43 @@ class PatchCore(pl.LightningModule):
                 pool = torch.nn.Identity()#
             
         return pool(feature) 
-                                    
+
+def embedding_concat_frame(embeddings, cuda_active):
+    '''
+    framework for concatenating more than two features or less than two
+    '''
+    no_of_embeddings = len(embeddings)
+    if no_of_embeddings == int(1):
+        embeddings_result = embeddings[0].cpu()
+    elif no_of_embeddings == int(2):
+        embeddings_result = embedding_concat(embeddings[0], embeddings[1])
+    elif no_of_embeddings > int(2):
+        for k in range(no_of_embeddings - 1):
+            if k == int(0):
+                embeddings_result = embedding_concat(embeddings[0], embeddings[1]) # default
+                pass
+            else:
+                if torch.cuda.is_available() and cuda_active:
+                    embeddings_result = embedding_concat(embeddings_result.cuda(), embeddings[k+1])
+                else:
+                    embeddings_result = embedding_concat(embeddings_result, embeddings[k+1].cpu())
+    return embeddings_result
+
 def get_args():
     import argparse
     parser = argparse.ArgumentParser(description='ANOMALYDETECTION')
     parser.add_argument('--phase', choices=['train','test'], default='train')
     parser.add_argument('--dataset_path', default=r'/mnt/crucial/UNI/IIIT_Muen/MA/MVTechAD')
-    parser.add_argument('--category', default='own')
+    parser.add_argument('--category', default='own', choices=['bottle', 'cable', 'capsule', 'carpet', 'grid', 'hazelnut', 'leather', 'metal_nut', 'pill', 'screw', 'tile', 'toothbrush', 'transistor', 'wood', 'zipper'])
     parser.add_argument('--num_epochs', default=1)
     parser.add_argument('--batch_size', default=32)
     parser.add_argument('--load_size', default=224)
     parser.add_argument('--input_size', default=224)
-    parser.add_argument('--coreset_sampling_ratio', default=1.0)
+    parser.add_argument('--coreset_sampling_ratio', default=0.1)
     parser.add_argument('--project_root_path', default=r'./test')
     parser.add_argument('--save_src_code', default=True)
     parser.add_argument('--save_anomaly_map', default=True)
-    parser.add_argument('--n_neighbors', type=int, default=9)
+    parser.add_argument('--n_neighbors', type=int, default=20)
     args = parser.parse_args()
     return args
 
@@ -687,13 +767,16 @@ def prep_dirs(root):
 
 
 if __name__ == '__main__':
-    device = torch.device("cpu")#"cuda" if torch.cuda.is_available() else "cpu")
+    # device = torch.device("cuda")#"cuda" if torch.cuda.is_available() else "cpu")
     args = get_args()
-    trainer = pl.Trainer.from_argparse_args(args, default_root_dir=os.path.join(args.project_root_path, args.category), max_epochs=args.num_epochs, gpus=0)
+    
     model = PatchCore(hparams=args)
     if args.phase == 'train':
+        trainer = pl.Trainer.from_argparse_args(args, default_root_dir=os.path.join(args.project_root_path, args.category), max_epochs=args.num_epochs, gpus=1)
         trainer.fit(model)
+        trainer = pl.Trainer.from_argparse_args(args, default_root_dir=os.path.join(args.project_root_path, args.category), max_epochs=args.num_epochs, gpus=0)
         trainer.test(model)
     elif args.phase == 'test':
+        trainer = pl.Trainer.from_argparse_args(args, default_root_dir=os.path.join(args.project_root_path, args.category), max_epochs=args.num_epochs, gpus=0)
         trainer.test(model)
 
