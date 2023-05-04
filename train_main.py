@@ -29,23 +29,30 @@ from anomalib.models.components.sampling import k_center_greedy
 from torchinfo import summary
 
 class PatchCore(pl.LightningModule):
-    def __init__(self, hparams):
+    def __init__(self, args):
         super(PatchCore, self).__init__()
         
         # options
+        self.category = args.category
+        self.load_size = args.load_size
+        self.input_size = args.input_size
+        self.n_neighbors = args.n_neighbors
+        self.coreset_sampling_ratio = args.coreset_sampling_ratio
+        self.dataset_path = args.dataset_path
+        self.batch_size = args.batch_size
         self.faiss = False # temp
         self.adapted_score_calc = True
         self.own_knn = True
         self.normalize = True
         self.quantization = False
-        self.measure_inference = True
+        self.measure_inference = False
         # self.multiple_filters = ()
         self.number_of_reps = 50 # number of reps during measurement. Beacause we can assume a consistent estimator, results get more accurate with more reps
         self.warm_up_reps = 10 # before the actual measurement is done, we execute the process a couple of times without measurement to ensure that there is no influence of initialization and that the circumstances (e.g. thermal state of hardware) are representive.
         self.cuda_active = False#torch.cuda.is_available()
         self.cuda_active_training = False
         self.dim_reduction = False
-        self.num_workers = 12
+        self.num_workers = 1
         self.log_file_name = f'trial_{int(time.time())}.csv'
         self.save_am = False
         self.only_img_lvl = True
@@ -59,10 +66,10 @@ class PatchCore(pl.LightningModule):
         self.reduction_factor = 75
         self.pooling_strategy = ['first_trial', 'max_1']#, 'first_trial']#, 'first_trial_max'] # 'first_trial'
         
-        self.save_hyperparameters(hparams)
+        self.save_hyperparameters(args)
         
         self.model_id = "RN18"
-        self.layers_needed = [2,3]#,3]#,3]
+        self.layers_needed = [2]#,3]#,3]#,3]
         self.layer_cut = True
         self.prune_output_layer = (False, [])
         
@@ -75,15 +82,15 @@ class PatchCore(pl.LightningModule):
         self.init_results_list()
 
         self.data_transforms = transforms.Compose([
-                        transforms.Resize((args.load_size, args.load_size), Image.ANTIALIAS),
+                        transforms.Resize((self.load_size, self.load_size), Image.ANTIALIAS),
                         transforms.ToTensor(),
-                        transforms.CenterCrop(args.input_size),
+                        transforms.CenterCrop(self.input_size),
                         transforms.Normalize(mean=[0.485, 0.456, 0.406],
                                             std=[0.229, 0.224, 0.225])]) # from imagenet
         self.gt_transforms = transforms.Compose([
-                        transforms.Resize((args.load_size, args.load_size)),
+                        transforms.Resize((self.load_size, self.load_size)),
                         transforms.ToTensor(),
-                        transforms.CenterCrop(args.input_size)])
+                        transforms.CenterCrop(self.input_size)])
         self.inv_normalize = transforms.Normalize(mean=[-0.485/0.229, -0.456/0.224, -0.406/0.255], std=[1/0.229, 1/0.224, 1/0.255])
         
         if self.quantization:
@@ -121,12 +128,12 @@ class PatchCore(pl.LightningModule):
         cv2.imwrite(os.path.join(self.sample_path, f'{x_type}_{file_name}_gt.jpg'), gt_img)
 
     def train_dataloader(self):
-        image_datasets = MVTecDataset(root=os.path.join(args.dataset_path,args.category), transform=self.data_transforms, gt_transform=self.gt_transforms, phase='train', half=self.quantization)
-        train_loader = DataLoader(image_datasets, batch_size=args.batch_size, shuffle=True, num_workers=self.num_workers)
+        image_datasets = MVTecDataset(root=os.path.join(self.dataset_path,self.category), transform=self.data_transforms, gt_transform=self.gt_transforms, phase='train', half=self.quantization)
+        train_loader = DataLoader(image_datasets, batch_size=self.batch_size, shuffle=True, num_workers=self.num_workers)
         return train_loader
 
     def test_dataloader(self):
-        test_datasets = MVTecDataset(root=os.path.join(args.dataset_path,args.category), transform=self.data_transforms, gt_transform=self.gt_transforms, phase='test', half=self.quantization)
+        test_datasets = MVTecDataset(root=os.path.join(self.dataset_path,self.category), transform=self.data_transforms, gt_transform=self.gt_transforms, phase='test', half=self.quantization)
         test_loader = DataLoader(test_datasets, batch_size=1, shuffle=False, num_workers=self.num_workers)
         return test_loader
 
@@ -135,20 +142,20 @@ class PatchCore(pl.LightningModule):
 
     def on_train_start(self):
         self.model.eval() # to stop running_var move (maybe not critical)        
-        self.embedding_dir_path, self.sample_path, self.source_code_save_path = prep_dirs(self.logger.log_dir, args.category)
+        self.embedding_dir_path, self.sample_path, self.source_code_save_path = prep_dirs(self.logger.log_dir, self.category)
         self.embedding_np = np.array([])
     
     def on_test_start(self):
-        self.embedding_dir_path, self.sample_path, self.source_code_save_path = prep_dirs(self.logger.log_dir, args.category)
+        self.embedding_dir_path, self.sample_path, self.source_code_save_path = prep_dirs(self.logger.log_dir, self.category)
         if self.faiss:
             self.index = faiss.read_index(os.path.join(self.embedding_dir_path,'index.faiss'))
             if self.cuda_active:
                 res = faiss.StandardGpuResources()
                 self.index = faiss.index_cpu_to_gpu(res, 0 ,self.index)
         elif self.own_knn:
-            self.knn = KNN(torch.from_numpy(self.embedding_coreset), k=args.n_neighbors) #.cuda()
+            self.knn = KNN(torch.from_numpy(self.embedding_coreset), k=self.n_neighbors) #.cuda()
         else:
-            self.nbrs = NearestNeighbors(n_neighbors=args.n_neighbors, algorithm='ball_tree', metric='minkowski', p=2).fit(self.embedding_coreset)
+            self.nbrs = NearestNeighbors(n_neighbors=self.n_neighbors, algorithm='ball_tree', metric='minkowski', p=2).fit(self.embedding_coreset)
         self.init_results_list()
         
     def training_step(self, batch, batch_idx): # save locally aware patch features
@@ -219,7 +226,7 @@ class PatchCore(pl.LightningModule):
             self.prune_output_layer = (True, self.idx_chosen)
             self.model = Backbone(model_id=self.model_id, layers_needed=self.layers_needed, layer_cut=self.layer_cut, prune_output_layer=self.prune_output_layer)
         # Random projection
-        if args.coreset_sampling_ratio == 1.0:
+        if self.coreset_sampling_ratio == 1.0:
             self.embedding_coreset = total_embeddings
         else:                  
             if False: # two different implementation that yield the same result (approximately)
@@ -227,13 +234,13 @@ class PatchCore(pl.LightningModule):
                 self.randomprojector.fit(total_embeddings)
                 # Coreset Subsampling
                 selector = kCenterGreedy(total_embeddings,0,0)
-                selected_idx = selector.select_batch(model=self.randomprojector, already_selected=[], N=int(total_embeddings.shape[0]*args.coreset_sampling_ratio))
+                selected_idx = selector.select_batch(model=self.randomprojector, already_selected=[], N=int(total_embeddings.shape[0]*self.coreset_sampling_ratio))
             else:
                 # total_embeddings_copy = total_embeddings.astype(np.float32)
                 if self.cuda_active or self.cuda_active_training:
-                    sampler = k_center_greedy.KCenterGreedy(embedding=torch.from_numpy(total_embeddings).cuda(), sampling_ratio=float(args.coreset_sampling_ratio))
+                    sampler = k_center_greedy.KCenterGreedy(embedding=torch.from_numpy(total_embeddings).cuda(), sampling_ratio=float(self.coreset_sampling_ratio))
                 else:
-                    sampler = k_center_greedy.KCenterGreedy(embedding=torch.from_numpy(total_embeddings), sampling_ratio=float(args.coreset_sampling_ratio))
+                    sampler = k_center_greedy.KCenterGreedy(embedding=torch.from_numpy(total_embeddings), sampling_ratio=float(self.coreset_sampling_ratio))
                 selected_idx = sampler.select_coreset_idxs()
             
             self.embedding_coreset = total_embeddings[selected_idx]
@@ -520,14 +527,14 @@ class PatchCore(pl.LightningModule):
         '''
         if batch_size_1:
             if self.faiss:
-                score_patches, _ = self.index.search(embeddings , k=args.n_neighbors)
+                score_patches, _ = self.index.search(embeddings , k=self.n_neighbors)
             elif self.own_knn:
                 score_patches = self.knn(torch.from_numpy(embeddings))[0].cpu().detach().numpy() # .cuda()
             else:
                 score_patches, _ = self.nbrs.kneighbors(embeddings)
         else:
             if self.faiss:
-                score_patches = [self.index.search(element, k=args.n_neighbors)[0] for element in embeddings]
+                score_patches = [self.index.search(element, k=self.n_neighbors)[0] for element in embeddings]
             elif self.own_knn:
                 score_patches = [self.knn(torch.from_numpy(element)[0].cpu().detach().numpy()) for element in embeddings] #.cuda()
             else:
@@ -553,12 +560,12 @@ class PatchCore(pl.LightningModule):
         '''
         if batch_size_1:
             anomaly_map = score_patches[:,0].reshape((int(math.sqrt(len(score_patches[:,0]))),int(math.sqrt(len(score_patches[:,0])))))
-            a = int(args.load_size) # int, 64 
+            a = int(self.load_size) # int, 64 
             anomaly_map_resized = cv2.resize(anomaly_map, (a, a)) # [8,8] --> [64,64]
             anomaly_map_resized_blur = gaussian_filter(anomaly_map_resized, sigma=4)# shape [8,8]
         else:
             anomaly_map = [score_patch[:,0].reshape((int(math.sqrt(len(score_patch[:,0]))),int(math.sqrt(len(score_patch[:,0]))))) for score_patch in score_patches]
-            a = int(args.load_size)
+            a = int(self.load_size)
             anomaly_map_resized = [cv2.resize(this_anomaly_map, (a, a)) for this_anomaly_map in anomaly_map]
             anomaly_map_resized_blur = [gaussian_filter(this_anomaly_map_resized, sigma=4) for this_anomaly_map_resized in anomaly_map_resized]
         return anomaly_map_resized_blur
@@ -609,8 +616,8 @@ def get_args():
     import argparse
     parser = argparse.ArgumentParser(description='ANOMALYDETECTION')
     parser.add_argument('--phase', choices=['train','test'], default='train')
-    parser.add_argument('--dataset_path', default=r'/mnt/crucial/UNI/IIIT_Muen/MA/MVTechAD') #/mnt/crucial/UNI/IIIT_Muen/MA/MVTechAD\\own\\train
-    parser.add_argument('--category', default='pill', choices=['bottle', 'cable', 'capsule', 'carpet', 'grid', 'hazelnut', 'leather', 'metal_nut', 'pill', 'screw', 'tile', 'toothbrush', 'transistor', 'wood', 'zipper'])
+    parser.add_argument('--dataset_path', default=r"C:\Users\uwupl\IIIT Muen\MA\productive\mvtec_anomaly_detection") #/mnt/crucial/UNI/IIIT_Muen/MA/MVTechAD
+    parser.add_argument('--category', default='own', choices=['bottle', 'cable', 'capsule', 'carpet', 'grid', 'hazelnut', 'leather', 'metal_nut', 'pill', 'screw', 'tile', 'toothbrush', 'transistor', 'wood', 'zipper'])
     parser.add_argument('--num_epochs', default=1)
     parser.add_argument('--batch_size', default=32)
     parser.add_argument('--load_size', default=224)
@@ -627,9 +634,9 @@ if __name__ == '__main__':
 
     args = get_args()
     
-    model = PatchCore(hparams=args)
+    model = PatchCore(args=args)
     if args.phase == 'train':
-        trainer = pl.Trainer.from_argparse_args(args, default_root_dir=os.path.join(args.project_root_path, args.category), max_epochs=args.num_epochs, accelerator='gpu', devices=1, precision = '32') # allow gpu for training    
+        trainer = pl.Trainer.from_argparse_args(args, default_root_dir=os.path.join(args.project_root_path, args.category), max_epochs=args.num_epochs, accelerator='cpu', devices=1, precision = '32') # allow gpu for training    
         trainer.fit(model)
         trainer = pl.Trainer.from_argparse_args(args, default_root_dir=os.path.join(args.project_root_path, args.category), max_epochs=args.num_epochs, accelerator='cpu', devices=1, precision='32') # but not for testing
         trainer.test(model)
