@@ -38,13 +38,14 @@ class PatchCore(pl.LightningModule):
         self.own_knn = True
         self.normalize = True
         self.quantization = False
-        self.measure_inference = False
+        self.measure_inference = True
         # self.multiple_filters = ()
         self.number_of_reps = 50 # number of reps during measurement. Beacause we can assume a consistent estimator, results get more accurate with more reps
         self.warm_up_reps = 10 # before the actual measurement is done, we execute the process a couple of times without measurement to ensure that there is no influence of initialization and that the circumstances (e.g. thermal state of hardware) are representive.
         self.cuda_active = False#torch.cuda.is_available()
         self.cuda_active_training = False
         self.dim_reduction = False
+        self.num_workers = 12
         self.log_file_name = f'trial_{int(time.time())}.csv'
         self.save_am = False
         self.only_img_lvl = True
@@ -55,12 +56,13 @@ class PatchCore(pl.LightningModule):
         self.reduce_via_std = False
         self.reduce_via_entropy = True
         self.reduce_via_entropy_normed = False
-        self.pooling_strategy = ['first_trial']#, 'max_1']#, 'first_trial']#, 'first_trial_max'] # 'first_trial'
+        self.reduction_factor = 75
+        self.pooling_strategy = ['first_trial', 'max_1']#, 'first_trial']#, 'first_trial_max'] # 'first_trial'
         
         self.save_hyperparameters(hparams)
         
         self.model_id = "RN18"
-        self.layers_needed = [2]#,3]#,3]
+        self.layers_needed = [2,3]#,3]#,3]
         self.layer_cut = True
         self.prune_output_layer = (False, [])
         
@@ -120,12 +122,12 @@ class PatchCore(pl.LightningModule):
 
     def train_dataloader(self):
         image_datasets = MVTecDataset(root=os.path.join(args.dataset_path,args.category), transform=self.data_transforms, gt_transform=self.gt_transforms, phase='train', half=self.quantization)
-        train_loader = DataLoader(image_datasets, batch_size=args.batch_size, shuffle=True, num_workers=6)
+        train_loader = DataLoader(image_datasets, batch_size=args.batch_size, shuffle=True, num_workers=self.num_workers)
         return train_loader
 
     def test_dataloader(self):
         test_datasets = MVTecDataset(root=os.path.join(args.dataset_path,args.category), transform=self.data_transforms, gt_transform=self.gt_transforms, phase='test', half=self.quantization)
-        test_loader = DataLoader(test_datasets, batch_size=1, shuffle=False, num_workers=0)
+        test_loader = DataLoader(test_datasets, batch_size=1, shuffle=False, num_workers=self.num_workers)
         return test_loader
 
     def configure_optimizers(self):
@@ -192,14 +194,14 @@ class PatchCore(pl.LightningModule):
             self.std = np.std(total_embeddings, axis=0)
             total_embeddings = (total_embeddings-self.mean)/self.std
         if self.reduce_via_entropy:
-            percentile_entropy = 100-12.5*2*2
+            percentile_entropy = 100-self.reduction_factor
             total_embeddings_copy = total_embeddings.copy()
             total_embeddings_copy[total_embeddings_copy<1e-15] = 1e-15
             entropy = -np.sum(total_embeddings_copy*np.log2(total_embeddings_copy), axis=0)#.shape
             self.idx_chosen = np.argwhere(entropy>np.percentile(entropy, percentile_entropy))[:,0]
             total_embeddings = np.take(total_embeddings, self.idx_chosen, axis=1)
         elif self.reduce_via_entropy_normed:
-            percentile_entropy = 100-12.5*2*2
+            percentile_entropy = 100-self.reduction_factor
             total_embeddings_copy = total_embeddings.copy()
             total_embeddings_copy[total_embeddings_copy<1e-15] = 1e-15
             normed_embeddings = total_embeddings_copy/total_embeddings_copy.sum(axis=1, keepdims=1)
@@ -608,7 +610,7 @@ def get_args():
     parser = argparse.ArgumentParser(description='ANOMALYDETECTION')
     parser.add_argument('--phase', choices=['train','test'], default='train')
     parser.add_argument('--dataset_path', default=r'/mnt/crucial/UNI/IIIT_Muen/MA/MVTechAD') #/mnt/crucial/UNI/IIIT_Muen/MA/MVTechAD\\own\\train
-    parser.add_argument('--category', default='own', choices=['bottle', 'cable', 'capsule', 'carpet', 'grid', 'hazelnut', 'leather', 'metal_nut', 'pill', 'screw', 'tile', 'toothbrush', 'transistor', 'wood', 'zipper'])
+    parser.add_argument('--category', default='pill', choices=['bottle', 'cable', 'capsule', 'carpet', 'grid', 'hazelnut', 'leather', 'metal_nut', 'pill', 'screw', 'tile', 'toothbrush', 'transistor', 'wood', 'zipper'])
     parser.add_argument('--num_epochs', default=1)
     parser.add_argument('--batch_size', default=32)
     parser.add_argument('--load_size', default=224)
@@ -627,9 +629,9 @@ if __name__ == '__main__':
     
     model = PatchCore(hparams=args)
     if args.phase == 'train':
-        trainer = pl.Trainer.from_argparse_args(args, default_root_dir=os.path.join(args.project_root_path, args.category), max_epochs=args.num_epochs, gpus=1) # allow gpu for training    
+        trainer = pl.Trainer.from_argparse_args(args, default_root_dir=os.path.join(args.project_root_path, args.category), max_epochs=args.num_epochs, accelerator='gpu', devices=1, precision = '32') # allow gpu for training    
         trainer.fit(model)
-        trainer = pl.Trainer.from_argparse_args(args, default_root_dir=os.path.join(args.project_root_path, args.category), max_epochs=args.num_epochs, gpus=0) # but not for testing
+        trainer = pl.Trainer.from_argparse_args(args, default_root_dir=os.path.join(args.project_root_path, args.category), max_epochs=args.num_epochs, accelerator='cpu', devices=1, precision='32') # but not for testing
         trainer.test(model)
     elif args.phase == 'test':
         trainer = pl.Trainer.from_argparse_args(args, default_root_dir=os.path.join(args.project_root_path, args.category), max_epochs=args.num_epochs, gpus=0)
