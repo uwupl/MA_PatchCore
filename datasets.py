@@ -3,11 +3,10 @@ import torch
 import glob
 import numpy as np
 from PIL import Image
-import cv2
 from torch.utils.data import Dataset
 
 class MVTecDataset(Dataset):
-    def __init__(self, root, transform, gt_transform, phase):
+    def __init__(self, root, transform, gt_transform, phase, half=False):
         if phase=='train':
             self.img_path = os.path.join(root, 'train')
         else:
@@ -17,7 +16,8 @@ class MVTecDataset(Dataset):
         self.gt_transform = gt_transform
         # load dataset
         self.img_paths, self.gt_paths, self.labels, self.types = self.load_dataset() # self.labels => good : 0, anomaly : 1
-
+        self.half = half
+        
     def load_dataset(self):
 
         img_tot_paths = []
@@ -55,6 +55,8 @@ class MVTecDataset(Dataset):
         img_path, gt, label, img_type = self.img_paths[idx], self.gt_paths[idx], self.labels[idx], self.types[idx]
         img = Image.open(img_path).convert('RGB')
         img = self.transform(img)
+        if self.half:
+            img = img.half()
         if gt == 0:
             gt = torch.zeros([1, img.size()[-2], img.size()[-2]])
         else:
@@ -65,40 +67,4 @@ class MVTecDataset(Dataset):
 
         return img, gt, label, os.path.basename(img_path[:-4]), img_type
 
-def cvt2heatmap(gray):
-    heatmap = cv2.applyColorMap(np.uint8(gray), cv2.COLORMAP_JET)
-    return heatmap
-
-def heatmap_on_image(heatmap, image):
-    if heatmap.shape != image.shape:
-        heatmap = cv2.resize(heatmap, (image.shape[0], image.shape[1]))
-    out = np.float32(heatmap)/255 + np.float32(image)/255
-    out = out / np.max(out)
-    return np.uint8(255 * out)
-
-def min_max_norm(image):
-    a_min, a_max = image.min(), image.max()
-    return (image-a_min)/(a_max - a_min) 
-
-def record_gpu(cuda_event):
-    '''
-    gpu_measurement
-    '''
-    cuda_event.record()
-    torch.cuda.synchronize()
-    
-    return cuda_event
-
-def distance_matrix(x, y=None, p=2):  # pairwise distance of vectors
-    y = x if type(y) == type(None) else y
-
-    n = x.size(0)
-    m = y.size(0)
-    d = x.size(1)
-
-    x = x.unsqueeze(1).expand(n, m, d)
-    y = y.unsqueeze(0).expand(n, m, d)
-
-    dist = torch.pow(x - y, p).sum(2)
-    return dist
 

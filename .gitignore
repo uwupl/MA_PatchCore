@@ -127,3 +127,12 @@ dmypy.json
 
 # Pyre type checker
 .pyre/
+
+# custom
+# test results and anomaly maps
+/test/*
+/results/*
+/embeddings/*
+*.ipynb
+*.pt
+*.npy

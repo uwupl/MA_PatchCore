@@ -1,12 +1,12 @@
 import os
-import glob
-import shutil
 from backbone import Backbone
-from dataset_utilities import MVTecDataset, min_max_norm, heatmap_on_image, cvt2heatmap, distance_matrix, record_gpu
+from datasets import MVTecDataset
+from utils import min_max_norm, heatmap_on_image, cvt2heatmap, distance_matrix, record_gpu, modified_kNN_score_calc
+from pooling import adaptive_pooling
+from embedding import reshape_embedding, embedding_concat_frame
 from search import KNN, NN
 import numpy as np
 import pandas as pd
-# import numba as nb
 from PIL import Image
 import cv2
 
@@ -18,7 +18,6 @@ import torch
 from torch.nn import functional as F
 from torchvision import transforms
 from torch.utils.data import DataLoader
-# from torch.utils.data import Dataset
 import pytorch_lightning as pl
 import faiss
 import pickle
@@ -34,85 +33,6 @@ from collections import OrderedDict
 #imagenet
 mean_train = [0.485, 0.456, 0.406]
 std_train = [0.229, 0.224, 0.225]
-
-def embedding_concat(x, y):
-    '''
-    alligns dimensions
-    
-    TODO: numba version plus lightweight version
-    
-    from https://github.com/xiahaifeng1995/PaDiM-Anomaly-Detection-Localization-master
-    '''
-    B, C1, H1, W1 = x.size()
-    _, C2, H2, W2 = y.size()
-    s = int(H1 / H2)
-    x = F.unfold(x, kernel_size=s, dilation=1, stride=s)
-    x = x.view(B, C1, -1, H2, W2)
-    z = torch.zeros(B, C1 + C2, x.size(2), H2, W2)
-    for i in range(x.size(2)):
-        z[:, :, i, :, :] = torch.cat((x[:, :, i, :, :], y), 1)
-    z = z.view(B, -1, H2 * W2)
-    z = F.fold(z, kernel_size=s, output_size=(H1, W1), stride=s)
-    return z
-
-def reshape_embedding_old(embedding):
-    '''
-    flattens spatial dimensions and concatenates channels. Results in 1D-Vector
-    
-    TODO: numba or numpy version! 
-    '''
-    embedding_list = []
-    for k in range(embedding.shape[0]):
-        for i in range(embedding.shape[2]):
-            for j in range(embedding.shape[3]):
-                embedding_list.append(embedding[k, :, i, j])
-    return np.array(embedding_list)
-
-# @nb.njit
-def reshape_embedding(embedding):
-    '''
-    flattens spatial dimensions and concatenates channels. Results in 1D-Vector
-    '''
-    # embeddings = np.empty((embedding.shape[0]*embedding.shape[2]*embedding.shape[3], embedding.shape[1]))
-    # out = np.reshape(embedding, (embedding.shape[0]*embedding.shape[2]*embedding.shape[3], embedding.shape[1]))
-    out = np.empty(shape=(embedding.shape[0]*embedding.shape[2]*embedding.shape[3], embedding.shape[1]), dtype=np.float32) # TODO: dtype?
-    counter = int(0)
-    for k in range(embedding.shape[0]):
-        for i in range(embedding.shape[2]):
-            for j in range(embedding.shape[3]):
-                out[counter, :] = embedding[k, :, i, j]
-                counter += 1
-    return out
-                                  
-# @nb.jit(nopython=True)
-def modified_kNN_score_calc_old(score_patches):
-    k = score_patches.shape[1]
-    weights = np.divide(np.array([k-i for i in range(k)]), 1)#((k-1)*k)/2)
-    # weights = np.ones(k)
-    dists = np.sum(np.multiply(score_patches, weights), axis=1)
-    N_b = score_patches[np.argmax(dists)]
-    w = (1 - (np.max(np.exp(N_b))/np.sum(np.exp(N_b))))
-    score = w*np.max(dists)
-    return score
-
-# @nb.jit(nopython=True)
-def modified_kNN_score_calc(score_patches):
-    k = score_patches.shape[1]
-    l = 10
-    # weights = np.divide(np.array([(k-i) for i in range(k)]), ((k-1)*k)/2)
-    # weights = np.ones(k)
-    # weights = np.zeros(k)
-    # weights[0] = 1
-    score_patches = score_patches.astype(np.float64)
-    weights = np.divide(np.array([(k-i)**2 for i in range(k)]), 1, dtype=np.float64) # Summe(i²) = (k*(k+1)*(2*k+1))/6
-    dists = np.sum(np.multiply(score_patches, weights), axis=1, dtype=np.float64)
-    sorted_args = np.argsort(dists)
-    score = np.zeros(l)
-    for p in range(1,l+1):    
-        N_b = score_patches[sorted_args[-p]]
-        w = (1 - (np.max(np.exp(N_b))/np.sum(np.exp(N_b))))
-        score[p-1] =  w*dists[sorted_args[-p]]
-    return np.mean(score)
 
 class PatchCore(pl.LightningModule):
     def __init__(self, hparams):
@@ -244,18 +164,11 @@ class PatchCore(pl.LightningModule):
         for k, feature in enumerate(features):
             if type(self.pooling_strategy) == list:
                 for strategy in self.pooling_strategy:
-                    pooled_feature = self.adaptive_pooling(feature, strategy)
+                    pooled_feature = adaptive_pooling(feature, strategy)
                     embeddings.append(pooled_feature)
             else:
-                pooled_feature = self.adaptive_pooling(feature, self.pooling_strategy)
+                pooled_feature = adaptive_pooling(feature, self.pooling_strategy)
                 embeddings.append(pooled_feature)
-            # pooled_feature = self.adaptive_pooling(feature, self.pooling_strategy)#torch.nn.AvgPool2d(3, 1, 1)(feature)#self.adaptive_pooling(feature)# using AvgPool2d to calculate local-aware features
-            # if k in args.feature_map_to_reduce and args.partial_reduction:
-            #     org_shape = pooled_feature.shape
-            #     pooled_feature = self.partial_reducer.transform(np.reshape(pooled_feature.cpu(), (-1, org_shape[1])))
-            #     pooled_feature = torch.from_numpy(np.reshape(pooled_feature, (org_shape[0],-1, org_shape[2], org_shape[3])))
-            #     if not pooled_feature.device.__str__().__contains__(self.accelerator):
-            #         pooled_feature = pooled_feature.to(self.accelerator)
             
         embedding = embedding_concat_frame(embeddings=embeddings, cuda_active=self.cuda_active) # shape (batch, 448, 16, 16) --> default
         if batch_idx == int(0):
@@ -274,7 +187,6 @@ class PatchCore(pl.LightningModule):
                     feature_save = np.append(feature_save, np.expand_dims(l.cpu().numpy(), axis=0), axis=0)
             print(feature_save.shape)
             np.save(file_name_features + '.npy', feature_save)
-        # total_embeddings = np.array(self.embedding_list)
         total_embeddings = self.embedding_np
 
         if self.reduce_via_std:
@@ -577,13 +489,13 @@ class PatchCore(pl.LightningModule):
             # insert dim reduction here TODO 
             # before pooling
             ####
-            # pooled_features = self.adaptive_pooling(feature, self.pooling_strategy)#torch.nn.AvgPool2d(3, 1, 1)(feature) # TODO replace with adaptive pooling
+            # pooled_features = adaptive_pooling(feature, self.pooling_strategy)#torch.nn.AvgPool2d(3, 1, 1)(feature) # TODO replace with adaptive pooling
             if type(self.pooling_strategy) == list:
                 for strategy in self.pooling_strategy:
-                    pooled_feature = self.adaptive_pooling(feature, strategy)
+                    pooled_feature = adaptive_pooling(feature, strategy)
                     selected_features.append(pooled_feature)
             else:
-                pooled_feature = self.adaptive_pooling(feature, self.pooling_strategy)
+                pooled_feature = adaptive_pooling(feature, self.pooling_strategy)
                 selected_features.append(pooled_feature)
             ####
             # insert dim reduction here TODO 
@@ -697,79 +609,20 @@ class PatchCore(pl.LightningModule):
             pd_run_times.to_csv(os.path.join(os.path.dirname(__file__), "results", "csv",self.log_file_name))
             print(f'\n\nMEAN INFERENCE TIME: {pd_run_times["#11 whole process cpu"].mean()} ms\n')
 
-    def adaptive_pooling(self, feature, pooling_strategy):
-        '''
-        depending on input size and strategy, different pooling methods are applied for each layer.
-        '''
-        spatial_dim = feature.shape[3]
-        
-        if pooling_strategy.__contains__('default'):
-            pool = torch.nn.AvgPool2d(3, 1, 1)
-        
-        elif pooling_strategy.__contains__('first_trial'):
-            # everything to 7x7 with 224 input size
-            if spatial_dim == 56:  # TODO --> adapt depeding in input size of pic
-                pool = torch.nn.AvgPool2d(kernel_size=8, stride=4, padding=4)
-            elif spatial_dim == 28:
-                pool = torch.nn.AvgPool2d(kernel_size=4, stride=2, padding=2)
-            elif spatial_dim == 14:
-                pool = torch.nn.AvgPool2d(kernel_size=2, stride=1, padding=1)
-            elif spatial_dim == 7:
-                pool = torch.nn.AvgPool2d(kernel_size=1, stride=1, padding=1)#
-        elif pooling_strategy.__contains__('second_trial'):
-            if spatial_dim == 56:  # TODO --> adapt depeding in input size of pic
-                pool = torch.nn.AvgPool2d(kernel_size=8, stride=4, padding=2)
-            elif spatial_dim == 28:
-                pool = torch.nn.AvgPool2d(kernel_size=4, stride=2, padding=1)
-            elif spatial_dim == 14:
-                pool = torch.nn.AvgPool2d(kernel_size=2, stride=1, padding=0)
-            elif spatial_dim == 7:
-                pool = torch.nn.Identity()#
-            
-        elif pooling_strategy.__contains__('max_1'):
-            # everything to 7x7 with 224 input size
-            if spatial_dim == 56:  # TODO --> adapt depeding in input size of pic
-                pool = torch.nn.MaxPool2d(kernel_size=8, stride=4, padding=4)
-            elif spatial_dim == 28:
-                pool = torch.nn.MaxPool2d(kernel_size=4, stride=2, padding=2)
-            elif spatial_dim == 14:
-                pool = torch.nn.MaxPool2d(kernel_size=2, stride=1, padding=1)
-            elif spatial_dim == 7:
-                pool = torch.nn.MaxPool2d(kernel_size=1, stride=1, padding=1)#
-        return pool(feature) 
 
-def embedding_concat_frame(embeddings, cuda_active):
-    '''
-    framework for concatenating more than two features or less than two
-    '''
-    no_of_embeddings = len(embeddings)
-    if no_of_embeddings == int(1):
-        embeddings_result = embeddings[0].cpu()
-    elif no_of_embeddings == int(2):
-        embeddings_result = embedding_concat(embeddings[0], embeddings[1])
-    elif no_of_embeddings > int(2):
-        for k in range(no_of_embeddings - 1):
-            if k == int(0):
-                embeddings_result = embedding_concat(embeddings[0], embeddings[1]) # default
-                pass
-            else:
-                if torch.cuda.is_available() and cuda_active:
-                    embeddings_result = embedding_concat(embeddings_result.cuda(), embeddings[k+1])
-                else:
-                    embeddings_result = embedding_concat(embeddings_result, embeddings[k+1].cpu())
-    return embeddings_result
+
 
 def get_args():
     import argparse
     parser = argparse.ArgumentParser(description='ANOMALYDETECTION')
     parser.add_argument('--phase', choices=['train','test'], default='train')
-    parser.add_argument('--dataset_path', default=r'C:\Users\uwupl\IIIT Muen\MA\productive\mvtec_anomaly_detection') #/mnt/crucial/UNI/IIIT_Muen/MA/MVTechAD\\own\\train
+    parser.add_argument('--dataset_path', default=r'/mnt/crucial/UNI/IIIT_Muen/MA/MVTechAD') #/mnt/crucial/UNI/IIIT_Muen/MA/MVTechAD\\own\\train
     parser.add_argument('--category', default='own', choices=['bottle', 'cable', 'capsule', 'carpet', 'grid', 'hazelnut', 'leather', 'metal_nut', 'pill', 'screw', 'tile', 'toothbrush', 'transistor', 'wood', 'zipper'])
     parser.add_argument('--num_epochs', default=1)
     parser.add_argument('--batch_size', default=32)
     parser.add_argument('--load_size', default=224)
     parser.add_argument('--input_size', default=224)
-    parser.add_argument('--coreset_sampling_ratio', default=1.0)
+    parser.add_argument('--coreset_sampling_ratio', default=0.01)
     parser.add_argument('--project_root_path', default=r'./test')
     parser.add_argument('--save_src_code', default=True)
     parser.add_argument('--save_anomaly_map', default=True)
@@ -792,14 +645,14 @@ def prep_dirs(root):
 
 
 if __name__ == '__main__':
-    # device = torch.device("cuda")#"cuda" if torch.cuda.is_available() else "cpu")
+
     args = get_args()
     
     model = PatchCore(hparams=args)
     if args.phase == 'train':
-        trainer = pl.Trainer.from_argparse_args(args, default_root_dir=os.path.join(args.project_root_path, args.category), max_epochs=args.num_epochs, gpus=0)
+        trainer = pl.Trainer.from_argparse_args(args, default_root_dir=os.path.join(args.project_root_path, args.category), max_epochs=args.num_epochs, gpus=1) # allow gpu for training    
         trainer.fit(model)
-        trainer = pl.Trainer.from_argparse_args(args, default_root_dir=os.path.join(args.project_root_path, args.category), max_epochs=args.num_epochs, gpus=0)
+        trainer = pl.Trainer.from_argparse_args(args, default_root_dir=os.path.join(args.project_root_path, args.category), max_epochs=args.num_epochs, gpus=0) # but not for testing
         trainer.test(model)
     elif args.phase == 'test':
         trainer = pl.Trainer.from_argparse_args(args, default_root_dir=os.path.join(args.project_root_path, args.category), max_epochs=args.num_epochs, gpus=0)
