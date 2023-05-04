@@ -2,7 +2,7 @@ import numpy as np
 import numba as nb
 import torch
 import cv2
-
+import os
 
 def cvt2heatmap(gray):
     heatmap = cv2.applyColorMap(np.uint8(gray), cv2.COLORMAP_JET)
@@ -70,3 +70,15 @@ def modified_kNN_score_calc(score_patches):
         w = (1 - (np.max(np.exp(N_b))/np.sum(np.exp(N_b))))
         score[p-1] =  w*dists[sorted_args[-p]]
     return np.mean(score)
+
+def prep_dirs(root, category):
+    # make embeddings dir
+    embeddings_path = os.path.join('./', 'embeddings', category)
+    os.makedirs(embeddings_path, exist_ok=True)
+    # make sample dir
+    sample_path = os.path.join(root, 'sample')
+    os.makedirs(sample_path, exist_ok=True)
+    # make source code record dir & copy
+    source_code_save_path = os.path.join(root, 'src')
+    os.makedirs(source_code_save_path, exist_ok=True)
+    return embeddings_path, sample_path, source_code_save_path

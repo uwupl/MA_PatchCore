@@ -1,7 +1,7 @@
 import os
 from backbone import Backbone
 from datasets import MVTecDataset
-from utils import min_max_norm, heatmap_on_image, cvt2heatmap, distance_matrix, record_gpu, modified_kNN_score_calc
+from utils import min_max_norm, heatmap_on_image, cvt2heatmap, distance_matrix, record_gpu, modified_kNN_score_calc, prep_dirs
 from pooling import adaptive_pooling
 from embedding import reshape_embedding, embedding_concat_frame
 from search import KNN, NN
@@ -26,13 +26,7 @@ import time
 import math
 from time import perf_counter as record_cpu
 from anomalib.models.components.sampling import k_center_greedy
-
 from torchinfo import summary
-from collections import OrderedDict
-
-#imagenet
-mean_train = [0.485, 0.456, 0.406]
-std_train = [0.229, 0.224, 0.225]
 
 class PatchCore(pl.LightningModule):
     def __init__(self, hparams):
@@ -82,8 +76,8 @@ class PatchCore(pl.LightningModule):
                         transforms.Resize((args.load_size, args.load_size), Image.ANTIALIAS),
                         transforms.ToTensor(),
                         transforms.CenterCrop(args.input_size),
-                        transforms.Normalize(mean=mean_train,
-                                            std=std_train)])
+                        transforms.Normalize(mean=[0.485, 0.456, 0.406],
+                                            std=[0.229, 0.224, 0.225])]) # from imagenet
         self.gt_transforms = transforms.Compose([
                         transforms.Resize((args.load_size, args.load_size)),
                         transforms.ToTensor(),
@@ -139,11 +133,11 @@ class PatchCore(pl.LightningModule):
 
     def on_train_start(self):
         self.model.eval() # to stop running_var move (maybe not critical)        
-        self.embedding_dir_path, self.sample_path, self.source_code_save_path = prep_dirs(self.logger.log_dir)
+        self.embedding_dir_path, self.sample_path, self.source_code_save_path = prep_dirs(self.logger.log_dir, args.category)
         self.embedding_np = np.array([])
     
     def on_test_start(self):
-        self.embedding_dir_path, self.sample_path, self.source_code_save_path = prep_dirs(self.logger.log_dir)
+        self.embedding_dir_path, self.sample_path, self.source_code_save_path = prep_dirs(self.logger.log_dir, args.category)
         if self.faiss:
             self.index = faiss.read_index(os.path.join(self.embedding_dir_path,'index.faiss'))
             if self.cuda_active:
@@ -609,9 +603,6 @@ class PatchCore(pl.LightningModule):
             pd_run_times.to_csv(os.path.join(os.path.dirname(__file__), "results", "csv",self.log_file_name))
             print(f'\n\nMEAN INFERENCE TIME: {pd_run_times["#11 whole process cpu"].mean()} ms\n')
 
-
-
-
 def get_args():
     import argparse
     parser = argparse.ArgumentParser(description='ANOMALYDETECTION')
@@ -629,20 +620,6 @@ def get_args():
     parser.add_argument('--n_neighbors', type=int, default=20)
     args = parser.parse_args()
     return args
-
-def prep_dirs(root):
-    # make embeddings dir
-    embeddings_path = os.path.join('./', 'embeddings', args.category)
-    os.makedirs(embeddings_path, exist_ok=True)
-    # make sample dir
-    sample_path = os.path.join(root, 'sample')
-    os.makedirs(sample_path, exist_ok=True)
-    # make source code record dir & copy
-    source_code_save_path = os.path.join(root, 'src')
-    os.makedirs(source_code_save_path, exist_ok=True)
-    return embeddings_path, sample_path, source_code_save_path
-
-
 
 if __name__ == '__main__':
 

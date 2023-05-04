@@ -3,7 +3,6 @@ from torchvision import models
 import torch.nn as nn
 from typing import List, Tuple, OrderedDict
 import torch_pruning as tp
-# from numpy import numpy.log2 as log2
 
 class Backbone(nn.Module):
     def __init__(
