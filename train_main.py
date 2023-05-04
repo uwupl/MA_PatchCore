@@ -6,7 +6,7 @@ from dataset_utilities import MVTecDataset, min_max_norm, heatmap_on_image, cvt2
 from search import KNN, NN
 import numpy as np
 import pandas as pd
-import numba as nb
+# import numba as nb
 from PIL import Image
 import cv2
 
@@ -68,7 +68,7 @@ def reshape_embedding_old(embedding):
                 embedding_list.append(embedding[k, :, i, j])
     return np.array(embedding_list)
 
-@nb.njit
+# @nb.njit
 def reshape_embedding(embedding):
     '''
     flattens spatial dimensions and concatenates channels. Results in 1D-Vector
@@ -84,7 +84,7 @@ def reshape_embedding(embedding):
                 counter += 1
     return out
                                   
-@nb.jit(nopython=True)
+# @nb.jit(nopython=True)
 def modified_kNN_score_calc_old(score_patches):
     k = score_patches.shape[1]
     weights = np.divide(np.array([k-i for i in range(k)]), 1)#((k-1)*k)/2)
@@ -125,10 +125,11 @@ class PatchCore(pl.LightningModule):
         self.normalize = True
         self.quantization = False
         self.measure_inference = False
+        # self.multiple_filters = ()
         self.number_of_reps = 50 # number of reps during measurement. Beacause we can assume a consistent estimator, results get more accurate with more reps
         self.warm_up_reps = 10 # before the actual measurement is done, we execute the process a couple of times without measurement to ensure that there is no influence of initialization and that the circumstances (e.g. thermal state of hardware) are representive.
         self.cuda_active = False#torch.cuda.is_available()
-        self.cuda_active_training = True
+        self.cuda_active_training = False
         self.dim_reduction = False
         self.log_file_name = f'trial_{int(time.time())}.csv'
         self.save_am = False
@@ -137,17 +138,17 @@ class PatchCore(pl.LightningModule):
         if self.save_features:
             self.features_to_store = []
         self.save_embeddings = False
-        self.reduce_via_std = True
-        self.reduce_via_entropy = False
+        self.reduce_via_std = False
+        self.reduce_via_entropy = True
         self.reduce_via_entropy_normed = False
-        self.pooling_strategy = 'first_trial'
+        self.pooling_strategy = ['first_trial']#, 'max_1']#, 'first_trial']#, 'first_trial_max'] # 'first_trial'
         
         self.save_hyperparameters(hparams)
         
         self.model_id = "RN18"
         self.layers_needed = [2]#,3]#,3]
         self.layer_cut = True
-        self.prune_output_layer = (True, [])
+        self.prune_output_layer = (False, [])
         
         self.model = Backbone(model_id=self.model_id, layers_needed=self.layers_needed, layer_cut=self.layer_cut, prune_output_layer=(False, []))
         if self.quantization:
@@ -205,7 +206,7 @@ class PatchCore(pl.LightningModule):
 
     def train_dataloader(self):
         image_datasets = MVTecDataset(root=os.path.join(args.dataset_path,args.category), transform=self.data_transforms, gt_transform=self.gt_transforms, phase='train', half=self.quantization)
-        train_loader = DataLoader(image_datasets, batch_size=args.batch_size, shuffle=True, num_workers=12)
+        train_loader = DataLoader(image_datasets, batch_size=args.batch_size, shuffle=True, num_workers=6)
         return train_loader
 
     def test_dataloader(self):
@@ -241,14 +242,21 @@ class PatchCore(pl.LightningModule):
             self.features_to_store.append(features[0].detach().cpu())        
         embeddings = []
         for k, feature in enumerate(features):
-            pooled_feature = self.adaptive_pooling(feature)#torch.nn.AvgPool2d(3, 1, 1)(feature)#self.adaptive_pooling(feature)# using AvgPool2d to calculate local-aware features
+            if type(self.pooling_strategy) == list:
+                for strategy in self.pooling_strategy:
+                    pooled_feature = self.adaptive_pooling(feature, strategy)
+                    embeddings.append(pooled_feature)
+            else:
+                pooled_feature = self.adaptive_pooling(feature, self.pooling_strategy)
+                embeddings.append(pooled_feature)
+            # pooled_feature = self.adaptive_pooling(feature, self.pooling_strategy)#torch.nn.AvgPool2d(3, 1, 1)(feature)#self.adaptive_pooling(feature)# using AvgPool2d to calculate local-aware features
             # if k in args.feature_map_to_reduce and args.partial_reduction:
             #     org_shape = pooled_feature.shape
             #     pooled_feature = self.partial_reducer.transform(np.reshape(pooled_feature.cpu(), (-1, org_shape[1])))
             #     pooled_feature = torch.from_numpy(np.reshape(pooled_feature, (org_shape[0],-1, org_shape[2], org_shape[3])))
             #     if not pooled_feature.device.__str__().__contains__(self.accelerator):
             #         pooled_feature = pooled_feature.to(self.accelerator)
-            embeddings.append(pooled_feature)
+            
         embedding = embedding_concat_frame(embeddings=embeddings, cuda_active=self.cuda_active) # shape (batch, 448, 16, 16) --> default
         if batch_idx == int(0):
             self.embedding_np = reshape_embedding(np.array(embedding))
@@ -278,14 +286,14 @@ class PatchCore(pl.LightningModule):
             self.std = np.std(total_embeddings, axis=0)
             total_embeddings = (total_embeddings-self.mean)/self.std
         if self.reduce_via_entropy:
-            percentile_entropy = 100-12.5*2
+            percentile_entropy = 100-12.5*2*2
             total_embeddings_copy = total_embeddings.copy()
             total_embeddings_copy[total_embeddings_copy<1e-15] = 1e-15
             entropy = -np.sum(total_embeddings_copy*np.log2(total_embeddings_copy), axis=0)#.shape
             self.idx_chosen = np.argwhere(entropy>np.percentile(entropy, percentile_entropy))[:,0]
             total_embeddings = np.take(total_embeddings, self.idx_chosen, axis=1)
         elif self.reduce_via_entropy_normed:
-            percentile_entropy = 100-12.5*2
+            percentile_entropy = 100-12.5*2*2
             total_embeddings_copy = total_embeddings.copy()
             total_embeddings_copy[total_embeddings_copy<1e-15] = 1e-15
             normed_embeddings = total_embeddings_copy/total_embeddings_copy.sum(axis=1, keepdims=1)
@@ -569,12 +577,19 @@ class PatchCore(pl.LightningModule):
             # insert dim reduction here TODO 
             # before pooling
             ####
-            pooled_features = self.adaptive_pooling(feature)#torch.nn.AvgPool2d(3, 1, 1)(feature) # TODO replace with adaptive pooling
+            # pooled_features = self.adaptive_pooling(feature, self.pooling_strategy)#torch.nn.AvgPool2d(3, 1, 1)(feature) # TODO replace with adaptive pooling
+            if type(self.pooling_strategy) == list:
+                for strategy in self.pooling_strategy:
+                    pooled_feature = self.adaptive_pooling(feature, strategy)
+                    selected_features.append(pooled_feature)
+            else:
+                pooled_feature = self.adaptive_pooling(feature, self.pooling_strategy)
+                selected_features.append(pooled_feature)
             ####
             # insert dim reduction here TODO 
             # after pooling
             ####
-            selected_features.append(pooled_features)
+            # selected_features.append(pooled_features)
         
         concatenated_features = embedding_concat_frame(embeddings=selected_features, cuda_active=self.cuda_active)
         
@@ -682,16 +697,16 @@ class PatchCore(pl.LightningModule):
             pd_run_times.to_csv(os.path.join(os.path.dirname(__file__), "results", "csv",self.log_file_name))
             print(f'\n\nMEAN INFERENCE TIME: {pd_run_times["#11 whole process cpu"].mean()} ms\n')
 
-    def adaptive_pooling(self, feature):
+    def adaptive_pooling(self, feature, pooling_strategy):
         '''
         depending on input size and strategy, different pooling methods are applied for each layer.
         '''
         spatial_dim = feature.shape[3]
         
-        if self.pooling_strategy.__contains__('default'):
+        if pooling_strategy.__contains__('default'):
             pool = torch.nn.AvgPool2d(3, 1, 1)
         
-        elif self.pooling_strategy.__contains__('first_trial'):
+        elif pooling_strategy.__contains__('first_trial'):
             # everything to 7x7 with 224 input size
             if spatial_dim == 56:  # TODO --> adapt depeding in input size of pic
                 pool = torch.nn.AvgPool2d(kernel_size=8, stride=4, padding=4)
@@ -701,7 +716,7 @@ class PatchCore(pl.LightningModule):
                 pool = torch.nn.AvgPool2d(kernel_size=2, stride=1, padding=1)
             elif spatial_dim == 7:
                 pool = torch.nn.AvgPool2d(kernel_size=1, stride=1, padding=1)#
-        elif self.pooling_strategy.__contains__('second_trial'):
+        elif pooling_strategy.__contains__('second_trial'):
             if spatial_dim == 56:  # TODO --> adapt depeding in input size of pic
                 pool = torch.nn.AvgPool2d(kernel_size=8, stride=4, padding=2)
             elif spatial_dim == 28:
@@ -711,6 +726,16 @@ class PatchCore(pl.LightningModule):
             elif spatial_dim == 7:
                 pool = torch.nn.Identity()#
             
+        elif pooling_strategy.__contains__('max_1'):
+            # everything to 7x7 with 224 input size
+            if spatial_dim == 56:  # TODO --> adapt depeding in input size of pic
+                pool = torch.nn.MaxPool2d(kernel_size=8, stride=4, padding=4)
+            elif spatial_dim == 28:
+                pool = torch.nn.MaxPool2d(kernel_size=4, stride=2, padding=2)
+            elif spatial_dim == 14:
+                pool = torch.nn.MaxPool2d(kernel_size=2, stride=1, padding=1)
+            elif spatial_dim == 7:
+                pool = torch.nn.MaxPool2d(kernel_size=1, stride=1, padding=1)#
         return pool(feature) 
 
 def embedding_concat_frame(embeddings, cuda_active):
@@ -738,13 +763,13 @@ def get_args():
     import argparse
     parser = argparse.ArgumentParser(description='ANOMALYDETECTION')
     parser.add_argument('--phase', choices=['train','test'], default='train')
-    parser.add_argument('--dataset_path', default=r'/mnt/crucial/UNI/IIIT_Muen/MA/MVTechAD')
+    parser.add_argument('--dataset_path', default=r'C:\Users\uwupl\IIIT Muen\MA\productive\mvtec_anomaly_detection') #/mnt/crucial/UNI/IIIT_Muen/MA/MVTechAD\\own\\train
     parser.add_argument('--category', default='own', choices=['bottle', 'cable', 'capsule', 'carpet', 'grid', 'hazelnut', 'leather', 'metal_nut', 'pill', 'screw', 'tile', 'toothbrush', 'transistor', 'wood', 'zipper'])
     parser.add_argument('--num_epochs', default=1)
     parser.add_argument('--batch_size', default=32)
     parser.add_argument('--load_size', default=224)
     parser.add_argument('--input_size', default=224)
-    parser.add_argument('--coreset_sampling_ratio', default=0.1)
+    parser.add_argument('--coreset_sampling_ratio', default=1.0)
     parser.add_argument('--project_root_path', default=r'./test')
     parser.add_argument('--save_src_code', default=True)
     parser.add_argument('--save_anomaly_map', default=True)
@@ -772,7 +797,7 @@ if __name__ == '__main__':
     
     model = PatchCore(hparams=args)
     if args.phase == 'train':
-        trainer = pl.Trainer.from_argparse_args(args, default_root_dir=os.path.join(args.project_root_path, args.category), max_epochs=args.num_epochs, gpus=1)
+        trainer = pl.Trainer.from_argparse_args(args, default_root_dir=os.path.join(args.project_root_path, args.category), max_epochs=args.num_epochs, gpus=0)
         trainer.fit(model)
         trainer = pl.Trainer.from_argparse_args(args, default_root_dir=os.path.join(args.project_root_path, args.category), max_epochs=args.num_epochs, gpus=0)
         trainer.test(model)

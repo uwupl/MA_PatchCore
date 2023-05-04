@@ -30,7 +30,7 @@ class Backbone(nn.Module):
             self.model =  models.wide_resnet101_2(weights=weights)
             self.procedure_resnet()
         elif self.model_id.__contains__('RN18'):
-            weights = models.ResNet18_Weights
+            weights = models.ResNet18_Weights.DEFAULT
             self.model = models.resnet18(weights=weights)
             self.procedure_resnet()
             
