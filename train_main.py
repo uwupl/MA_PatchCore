@@ -68,9 +68,10 @@ class PatchCore(pl.LightningModule):
         self.pooling_strategy = ['first_trial', 'max_1']#, 'first_trial']#, 'first_trial_max'] # 'first_trial'
         self.latences_filename = f'latences_{self.group_id}_{self.time_stamp}.csv'
         self.acc_filename = f'acc_{self.group_id}_{self.time_stamp}.csv'
-        self.log_path = os.path.join((os.path.dirname(__file__), "results",f"{self.group_id}", "csv"))
+        self.log_path = os.path.join(os.path.dirname(__file__), "results",f"{self.group_id}", "csv")
         if not os.path.exists(self.log_path):
             os.makedirs(self.log_path)
+        self.sum_idx = 0
         self.save_hyperparameters(args)
         
         self.model_id = "RN18"
@@ -612,16 +613,23 @@ class PatchCore(pl.LightningModule):
         values = {'pixel_auc': pixel_auc, 'img_auc': img_auc}
         self.log_dict(values)
         # own logging
-        if os.path.exists(os.path.join(os.path.dirname(__file__), "results",f"{self.group_id}","csv")) and self.measure_inference:
-            pd_run_times_ = pd.read_csv(os.path.join(os.path.dirname(__file__), "results",f"{self.group_id}","csv",self.latences_filename), index_col=0)
+        if self.measure_inference:
+            file_path = os.path.join(self.log_path, self.latences_filename)
+            pd_run_times_ = pd.read_csv(file_path, index_col=0)
             pd_results = pd.DataFrame({'img_auc': [img_auc]*pd_run_times_.shape[0], 'pixel_auc': [pixel_auc]*pd_run_times_.shape[0]})
             pd_run_times = pd.concat([pd_run_times_, pd_results], axis=1)
-            if True:
-                pd_options = pd.DataFrame({'category': self.category, 'adapted_score_calc': self.adapted_score_calc, 'pooling_strategy': self.pooling_strategy})
-                pd_run_times = pd.concat([pd_run_times, pd_options], axis=1)
-            pd_run_times.to_csv(os.path.join(os.path.dirname(__file__), "results", "csv",self.log_file_name))
+            pd_run_times.to_csv(file_path)
             print(f'\n\nMEAN INFERENCE TIME: {pd_run_times["#11 whole process cpu"].mean()} ms\n')
-
+        if True:
+            file_path = os.path.join(self.log_path, f'summary_{self.group_id}.csv')
+            if os.path.exists(file_path):
+                pd_sum = pd.read_csv(file_path, index_col=0)
+                pd_sum_current = pd.Series({'backbone': self.model_id, 'adapted_score_calc': self.adapted_score_calc, 'pooling_strategy': str(self.pooling_strategy)}).to_frame(self.category)#, index='category')
+                pd_sum = pd.concat([pd_sum, pd_sum_current], axis=0)
+            else:
+                pd_sum = pd.DataFrame({'category': self.category,'img_acc': img_auc, 'adapted_score_calc': str(self.adapted_score_calc), 'pooling_strategy': str(self.pooling_strategy)}, index='category')
+            pd_sum.to_csv(file_path)
+            
 def get_args():
     import argparse
     parser = argparse.ArgumentParser(description='ANOMALYDETECTION')
