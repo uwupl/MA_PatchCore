@@ -54,7 +54,7 @@ class PatchCore(pl.LightningModule):
         self.dim_reduction = False
         self.num_workers = 1
         self.time_stamp = f'{int(time.time())}'
-        self.run_id = 'tiral_'
+        self.group_id = 'tiral_'
         self.save_am = False
         self.only_img_lvl = True
         self.save_features = False
@@ -66,7 +66,11 @@ class PatchCore(pl.LightningModule):
         self.reduce_via_entropy_normed = False
         self.reduction_factor = 75
         self.pooling_strategy = ['first_trial', 'max_1']#, 'first_trial']#, 'first_trial_max'] # 'first_trial'
-        
+        self.latences_filename = f'latences_{self.group_id}_{self.time_stamp}.csv'
+        self.acc_filename = f'acc_{self.group_id}_{self.time_stamp}.csv'
+        self.log_path = os.path.join((os.path.dirname(__file__), "results",f"{self.group_id}", "csv"))
+        if not os.path.exists(self.log_path):
+            os.makedirs(self.log_path)
         self.save_hyperparameters(args)
         
         self.model_id = "RN18"
@@ -357,12 +361,13 @@ class PatchCore(pl.LightningModule):
             
             # save as csv using pandas dataframe
             pd_run_times = pd.DataFrame(run_times, index=[batch_idx])
-            if os.path.exists(os.path.join(os.path.dirname(__file__), "results","csv", self.log_file_name)):
-                pd_run_times_ = pd.read_csv(os.path.join(os.path.dirname(__file__), "results", "csv",self.log_file_name), index_col=0)
+            file_path = os.path.join(self.log_path, self.latences_filename)
+            if os.path.exists(file_path):
+                pd_run_times_ = pd.read_csv(file_path, index_col=0)
                 pd_run_times = pd.concat([pd_run_times_, pd_run_times], axis=0)
-                pd_run_times.to_csv(os.path.join(os.path.dirname(__file__), "results","csv", self.log_file_name))
+                pd_run_times.to_csv(file_path)
             else:
-                pd_run_times.to_csv(os.path.join(os.path.dirname(__file__), "results","csv", self.log_file_name))
+                pd_run_times.to_csv(file_path)
         
         else:
             _, _, score_patches, score, anomaly_map = self.test_step_core(batch=batch, measure=False)
@@ -606,9 +611,9 @@ class PatchCore(pl.LightningModule):
         print('test_epoch_end')
         values = {'pixel_auc': pixel_auc, 'img_auc': img_auc}
         self.log_dict(values)
-        if os.path.exists(os.path.join(os.path.dirname(__file__), "results","csv", self.log_file_name)) and self.measure_inference:
-            latences_filename = f'latences_{self.run_id}_{self.time_stamp}.csv'
-            pd_run_times_ = pd.read_csv(os.path.join(os.path.dirname(__file__), "results", "csv",latences_filename), index_col=0)
+        # own logging
+        if os.path.exists(os.path.join(os.path.dirname(__file__), "results",f"{self.group_id}","csv")) and self.measure_inference:
+            pd_run_times_ = pd.read_csv(os.path.join(os.path.dirname(__file__), "results",f"{self.group_id}","csv",self.latences_filename), index_col=0)
             pd_results = pd.DataFrame({'img_auc': [img_auc]*pd_run_times_.shape[0], 'pixel_auc': [pixel_auc]*pd_run_times_.shape[0]})
             pd_run_times = pd.concat([pd_run_times_, pd_results], axis=1)
             if True:
