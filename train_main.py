@@ -53,7 +53,8 @@ class PatchCore(pl.LightningModule):
         self.cuda_active_training = False
         self.dim_reduction = False
         self.num_workers = 1
-        self.log_file_name = f'trial_{int(time.time())}.csv'
+        self.time_stamp = f'{int(time.time())}'
+        self.run_id = 'tiral_'
         self.save_am = False
         self.only_img_lvl = True
         self.save_features = False
@@ -606,9 +607,13 @@ class PatchCore(pl.LightningModule):
         values = {'pixel_auc': pixel_auc, 'img_auc': img_auc}
         self.log_dict(values)
         if os.path.exists(os.path.join(os.path.dirname(__file__), "results","csv", self.log_file_name)) and self.measure_inference:
-            pd_run_times_ = pd.read_csv(os.path.join(os.path.dirname(__file__), "results", "csv",self.log_file_name), index_col=0)
+            latences_filename = f'latences_{self.run_id}_{self.time_stamp}.csv'
+            pd_run_times_ = pd.read_csv(os.path.join(os.path.dirname(__file__), "results", "csv",latences_filename), index_col=0)
             pd_results = pd.DataFrame({'img_auc': [img_auc]*pd_run_times_.shape[0], 'pixel_auc': [pixel_auc]*pd_run_times_.shape[0]})
             pd_run_times = pd.concat([pd_run_times_, pd_results], axis=1)
+            if True:
+                pd_options = pd.DataFrame({'category': self.category, 'adapted_score_calc': self.adapted_score_calc, 'pooling_strategy': self.pooling_strategy})
+                pd_run_times = pd.concat([pd_run_times, pd_options], axis=1)
             pd_run_times.to_csv(os.path.join(os.path.dirname(__file__), "results", "csv",self.log_file_name))
             print(f'\n\nMEAN INFERENCE TIME: {pd_run_times["#11 whole process cpu"].mean()} ms\n')
 
