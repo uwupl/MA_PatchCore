@@ -61,7 +61,7 @@ def modified_kNN_score_calc(score_patches, n_next_patches = 5):
     # weights = np.zeros(k)
     # weights[0] = 1
     
-    score_patches = score_patches[np.sum(score_patches,axis=1) < 1e34] 
+    score_patches = score_patches[np.sum(score_patches,axis=1) < 1e12] 
     k = score_patches.shape[1]
     
     # score_patches[score_patches >= 1e20] = 1e20

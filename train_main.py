@@ -557,7 +557,7 @@ class PatchCore(pl.LightningModule):
         calculates the image score based on score_patches
         '''
         if self.adapted_score_calc:
-            score = modified_kNN_score_calc(score_patches=score_patches, n_next_patches=self.n_next_patches)
+            score = modified_kNN_score_calc(score_patches=score_patches.astype(np.float64), n_next_patches=self.n_next_patches)
         else:
             N_b = score_patches[np.argmax(score_patches[:,0])] # only the closest val is relevant for selection! # this changes with adapted version.
             w = (1 - (np.max(np.exp(N_b))/np.sum(np.exp(N_b))))

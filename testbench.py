@@ -40,6 +40,7 @@ if __name__ == '__main__':
     model.reduction_factor = 50
     for k, cat in enumerate(cats):
             model.category = cat
+            print('\n\n', cat, '\n\n')
             if cat == 'own':
                 model.measure_inference = True
                 trainer = pl.Trainer.from_argparse_args(args, default_root_dir=os.path.join(args.project_root_path, args.category), max_epochs=args.num_epochs, accelerator='gpu', devices=1, precision = '32') # allow gpu for training    
@@ -58,6 +59,7 @@ if __name__ == '__main__':
     
     for k, cat in enumerate(cats):
         model.category = cat
+        print('\n\n', cat, '\n\n')
         if cat == 'own':
             model.measure_inference = True
             trainer = pl.Trainer.from_argparse_args(args, default_root_dir=os.path.join(args.project_root_path, args.category), max_epochs=args.num_epochs, accelerator='gpu', devices=1, precision = '32') # allow gpu for training    
@@ -80,6 +82,7 @@ if __name__ == '__main__':
     model.layers_needed = [2]
     for k, cat in enumerate(cats):
         model.category = cat
+        print('\n\n', cat, '\n\n')
         if cat == 'own':
             model.measure_inference = True
             trainer = pl.Trainer.from_argparse_args(args, default_root_dir=os.path.join(args.project_root_path, args.category), max_epochs=args.num_epochs, accelerator='gpu', devices=1, precision = '32') # allow gpu for training    
@@ -103,6 +106,7 @@ if __name__ == '__main__':
     model.normalize = True
     for k, cat in enumerate(cats):
         model.category = cat
+        print('\n\n', cat, '\n\n')
         if cat == 'own':
             model.measure_inference = True
             trainer = pl.Trainer.from_argparse_args(args, default_root_dir=os.path.join(args.project_root_path, args.category), max_epochs=args.num_epochs, accelerator='gpu', devices=1, precision = '32') # allow gpu for training    
@@ -128,6 +132,7 @@ if __name__ == '__main__':
     model.reduction_factor = 50
     for k, cat in enumerate(cats):
             model.category = cat
+            print('\n\n', cat, '\n\n')
             if cat == 'own':
                 model.measure_inference = True
                 trainer = pl.Trainer.from_argparse_args(args, default_root_dir=os.path.join(args.project_root_path, args.category), max_epochs=args.num_epochs, accelerator='gpu', devices=1, precision = '32') # allow gpu for training    
