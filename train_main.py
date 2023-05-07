@@ -40,21 +40,23 @@ class PatchCore(pl.LightningModule):
         self.coreset_sampling_ratio = args.coreset_sampling_ratio
         self.dataset_path = args.dataset_path
         self.batch_size = args.batch_size
-        self.faiss = False # temp
-        self.adapted_score_calc = True
+        self.n_next_patches = 5
+        self.faiss_standard = False # temp
+        self.faiss_quantized = False
         self.own_knn = True
-        self.normalize = True
+        self.adapted_score_calc = True
+        self.normalize = False
         self.quantization = False
         self.measure_inference = False
         # self.multiple_filters = ()
         self.number_of_reps = 50 # number of reps during measurement. Beacause we can assume a consistent estimator, results get more accurate with more reps
         self.warm_up_reps = 10 # before the actual measurement is done, we execute the process a couple of times without measurement to ensure that there is no influence of initialization and that the circumstances (e.g. thermal state of hardware) are representive.
         self.cuda_active = False#torch.cuda.is_available()
-        self.cuda_active_training = False
+        self.cuda_active_training = True
         self.dim_reduction = False
         self.num_workers = 1
         self.time_stamp = f'{int(time.time())}'
-        self.group_id = 'tiral_'
+        self.group_id = 'not_specified'
         self.save_am = False
         self.only_img_lvl = True
         self.save_features = False
@@ -62,20 +64,15 @@ class PatchCore(pl.LightningModule):
             self.features_to_store = []
         self.save_embeddings = False
         self.reduce_via_std = False
-        self.reduce_via_entropy = True
+        self.reduce_via_entropy = False
         self.reduce_via_entropy_normed = False
         self.reduction_factor = 75
-        self.pooling_strategy = ['first_trial', 'max_1']#, 'first_trial']#, 'first_trial_max'] # 'first_trial'
-        self.latences_filename = f'latences_{self.group_id}_{self.time_stamp}.csv'
-        self.acc_filename = f'acc_{self.group_id}_{self.time_stamp}.csv'
-        self.log_path = os.path.join(os.path.dirname(__file__), "results",f"{self.group_id}", "csv")
-        if not os.path.exists(self.log_path):
-            os.makedirs(self.log_path)
-        self.sum_idx = 0
+        self.pooling_strategy = ['default']#, 'max_1']#, 'first_trial']#, 'first_trial_max'] # 'first_trial'
+
         self.save_hyperparameters(args)
         
         self.model_id = "RN18"
-        self.layers_needed = [2]#,3]#,3]#,3]
+        self.layers_needed = [2,3]#,3]#,3]#,3]
         self.layer_cut = True
         self.prune_output_layer = (False, [])
         
@@ -147,13 +144,18 @@ class PatchCore(pl.LightningModule):
         return None
 
     def on_train_start(self):
+        self.log_path = os.path.join(os.path.dirname(__file__), "results",f"{self.group_id}", "csv")
+        if not os.path.exists(self.log_path):
+            os.makedirs(self.log_path)
+        self.latences_filename = f'latences_{self.group_id}_{self.time_stamp}.csv'
+        self.acc_filename = f'acc_{self.group_id}_{self.time_stamp}.csv'
         self.model.eval() # to stop running_var move (maybe not critical)        
         self.embedding_dir_path, self.sample_path, self.source_code_save_path = prep_dirs(self.logger.log_dir, self.category)
         self.embedding_np = np.array([])
     
     def on_test_start(self):
         self.embedding_dir_path, self.sample_path, self.source_code_save_path = prep_dirs(self.logger.log_dir, self.category)
-        if self.faiss:
+        if self.faiss_standard or self.faiss_quantized:
             self.index = faiss.read_index(os.path.join(self.embedding_dir_path,'index.faiss'))
             if self.cuda_active:
                 res = faiss.StandardGpuResources()
@@ -205,6 +207,7 @@ class PatchCore(pl.LightningModule):
         if self.normalize:
             self.mean = np.mean(total_embeddings, axis=0)
             self.std = np.std(total_embeddings, axis=0)
+            self.std = self.std + 1e-15
             total_embeddings = (total_embeddings-self.mean)/self.std
         if self.reduce_via_entropy:
             percentile_entropy = 100-self.reduction_factor
@@ -254,22 +257,22 @@ class PatchCore(pl.LightningModule):
         print('initial embedding size : ', total_embeddings.shape)
         print('final embedding size : ', self.embedding_coreset.shape)
         #faiss
-        if self.faiss:
-            if False:
-                nlist = 20 if self.embedding_coreset.shape[0] > 20 else self.embedding_coreset.shape[0]
-                n_probe = 5 # defaul 1
-                quantizer = faiss.IndexFlatL2(self.embedding_coreset.shape[1])
-                self.index = faiss.IndexIVFFlat(quantizer, self.embedding_coreset.shape[1], nlist, faiss.METRIC_L2)
-                assert not self.index.is_trained
-                self.index.train(self.embedding_coreset)
-                assert self.index.is_trained
-                self.index.add(self.embedding_coreset)
-                self.index.nprobe = n_probe
-                faiss.write_index(self.index,  os.path.join(self.embedding_dir_path,'index.faiss'))
-            else:
-                self.index = faiss.IndexFlatL2(self.embedding_coreset.shape[1])
-                self.index.add(self.embedding_coreset) 
-                faiss.write_index(self.index,  os.path.join(self.embedding_dir_path,'index.faiss'))
+        if self.faiss_quantized:
+            # if False:
+            nlist = 20 if self.embedding_coreset.shape[0] > 20 else self.embedding_coreset.shape[0]
+            n_probe = 5 # defaul 1
+            quantizer = faiss.IndexFlatL2(self.embedding_coreset.shape[1])
+            self.index = faiss.IndexIVFFlat(quantizer, self.embedding_coreset.shape[1], nlist, faiss.METRIC_L2)
+            assert not self.index.is_trained
+            self.index.train(self.embedding_coreset)
+            assert self.index.is_trained
+            self.index.add(self.embedding_coreset)
+            self.index.nprobe = n_probe
+            faiss.write_index(self.index,  os.path.join(self.embedding_dir_path,'index.faiss'))
+        elif self.faiss_standard:
+            self.index = faiss.IndexFlatL2(self.embedding_coreset.shape[1])
+            self.index.add(self.embedding_coreset) 
+            faiss.write_index(self.index,  os.path.join(self.embedding_dir_path,'index.faiss'))
         else:
             with open(os.path.join(self.embedding_dir_path, 'embedding.pickle'), 'wb') as f:
                 pickle.dump(self.embedding_coreset, f)
@@ -533,14 +536,14 @@ class PatchCore(pl.LightningModule):
         calc score_patches from which image score and anomaly map can be derived.
         '''
         if batch_size_1:
-            if self.faiss:
+            if self.faiss_quantized or self.faiss_standard:
                 score_patches, _ = self.index.search(embeddings , k=self.n_neighbors)
             elif self.own_knn:
                 score_patches = self.knn(torch.from_numpy(embeddings))[0].cpu().detach().numpy() # .cuda()
             else:
                 score_patches, _ = self.nbrs.kneighbors(embeddings)
         else:
-            if self.faiss:
+            if self.faiss_quantized or self.faiss_standard:
                 score_patches = [self.index.search(element, k=self.n_neighbors)[0] for element in embeddings]
             elif self.own_knn:
                 score_patches = [self.knn(torch.from_numpy(element)[0].cpu().detach().numpy()) for element in embeddings] #.cuda()
@@ -554,7 +557,7 @@ class PatchCore(pl.LightningModule):
         calculates the image score based on score_patches
         '''
         if self.adapted_score_calc:
-            score = modified_kNN_score_calc(score_patches=score_patches)
+            score = modified_kNN_score_calc(score_patches=score_patches, n_next_patches=self.n_next_patches)
         else:
             N_b = score_patches[np.argmax(score_patches[:,0])] # only the closest val is relevant for selection! # this changes with adapted version.
             w = (1 - (np.max(np.exp(N_b))/np.sum(np.exp(N_b))))
@@ -621,13 +624,40 @@ class PatchCore(pl.LightningModule):
             pd_run_times.to_csv(file_path)
             print(f'\n\nMEAN INFERENCE TIME: {pd_run_times["#11 whole process cpu"].mean()} ms\n')
         if True:
+            opt_dict = {
+                'backbone': self.model_id,
+                'pooling_strategy': str(self.pooling_strategy),
+                'layers_needed': self.layers_needed,
+                'layer_cut': self.layer_cut,
+                'prune_output_layer': f'{self.prune_output_layer[0]} #{len(self.prune_output_layer[1])}',
+                'adapted_score_calc': self.adapted_score_calc,
+                'n_neighbors': self.n_neighbors,
+                'n_next_patches': self.n_next_patches,
+                'coreset_sampling_ratio': self.coreset_sampling_ratio,
+                'reduce_via_std': self.reduce_via_std,
+                'reduce_via_entropy': self.reduce_via_entropy,
+                'reduce_via_entropy_normed': self.reduce_via_entropy_normed,
+                'reduce_factor': self.reduction_factor,
+                'coreset_size': self.embedding_coreset.shape,
+                'normalize_output': self.normalize,
+                'faiss_standard': self.faiss_standard,
+                'faiss_quantized': self.faiss_quantized,
+                'own_knn': self.own_knn,
+                'feature_extraction_[ms]': pd_run_times['#1 feature extraction cpu'].mean() if self.measure_inference else 0.0,
+                'embedding_of_features_[ms]': pd_run_times['#3 embedding of features cpu'].mean() if self.measure_inference else 0.0,
+                'calc_distances_[ms]': pd_run_times['#5 score patches cpu'].mean() if self.measure_inference else 0.0,
+                'calc_scores_[ms]': pd_run_times['#7 img lvl score cpu'].mean() if self.measure_inference else 0.0,
+                'total_time_[ms]': pd_run_times['#11 whole process cpu'].mean() if self.measure_inference else 0.0,
+                'img_auc_[%]': img_auc
+                }
             file_path = os.path.join(self.log_path, f'summary_{self.group_id}.csv')
             if os.path.exists(file_path):
                 pd_sum = pd.read_csv(file_path, index_col=0)
-                pd_sum_current = pd.Series({'backbone': self.model_id, 'adapted_score_calc': self.adapted_score_calc, 'pooling_strategy': str(self.pooling_strategy)}).to_frame(self.category)#, index='category')
-                pd_sum = pd.concat([pd_sum, pd_sum_current], axis=0)
+                pd_sum_current = pd.Series(opt_dict).to_frame(self.category)#, index='category')
+                pd_sum = pd.concat([pd_sum, pd_sum_current], axis=1)
             else:
-                pd_sum = pd.DataFrame({'category': self.category,'img_acc': img_auc, 'adapted_score_calc': str(self.adapted_score_calc), 'pooling_strategy': str(self.pooling_strategy)}, index='category')
+                # pd_sum = pd.DataFrame({'category': self.category,'img_acc': img_auc, 'adapted_score_calc': str(self.adapted_score_calc), 'pooling_strategy': str(self.pooling_strategy)}, index='category')
+                pd_sum = pd.Series(opt_dict).to_frame(self.category)
             pd_sum.to_csv(file_path)
             
 def get_args():

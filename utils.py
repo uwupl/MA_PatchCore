@@ -3,6 +3,7 @@ import numba as nb
 import torch
 import cv2
 import os
+import warnings
 
 def cvt2heatmap(gray):
     heatmap = cv2.applyColorMap(np.uint8(gray), cv2.COLORMAP_JET)
@@ -52,22 +53,34 @@ def modified_kNN_score_calc_old(score_patches):
     score = w*np.max(dists)
     return score
 
-@nb.jit(nopython=True)
-def modified_kNN_score_calc(score_patches):
-    k = score_patches.shape[1]
-    l = 10
+# @nb.jit(nopython=True)
+def modified_kNN_score_calc(score_patches, n_next_patches = 5):
+    
     # weights = np.divide(np.array([(k-i) for i in range(k)]), ((k-1)*k)/2)
     # weights = np.ones(k)
     # weights = np.zeros(k)
     # weights[0] = 1
-    score_patches = score_patches.astype(np.float64)
+    
+    score_patches = score_patches[np.sum(score_patches,axis=1) < 1e34] 
+    k = score_patches.shape[1]
+    
+    # score_patches[score_patches >= 1e20] = 1e20
     weights = np.array([(k-i)**2 for i in range(k)])#np.divide(np.array([(k-i)**2 for i in range(k)]), 1, dtype=np.float64) # Summe(i²) = (k*(k+1)*(2*k+1))/6
     dists = np.sum(np.multiply(score_patches, weights), axis=1, dtype=np.float64)
     sorted_args = np.argsort(dists)
-    score = np.zeros(l)
-    for p in range(1,l+1):    
+    score = np.zeros(n_next_patches)
+    for p in range(1,n_next_patches+1):    
         N_b = score_patches[sorted_args[-p]]
-        w = (1 - (np.max(np.exp(N_b))/np.sum(np.exp(N_b))))
+        exp_N_b = np.exp(N_b)
+        # exp_N_b[exp_N_b >= 1e25] = 1e25
+        exp_N_b_sum = np.sum(exp_N_b)
+        with warnings.catch_warnings():
+            warnings.filterwarnings('error')
+            try:
+                softmax = np.divide(np.max(exp_N_b), exp_N_b_sum)
+            except:
+                softmax = 1.0
+        w = np.float64(1.0 - softmax)
         score[p-1] =  w*dists[sorted_args[-p]]
     return np.mean(score)
 
