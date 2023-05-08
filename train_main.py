@@ -76,9 +76,9 @@ class PatchCore(pl.LightningModule):
         self.layer_cut = True
         self.prune_output_layer = (False, [])
         
-        self.model = Backbone(model_id=self.model_id, layers_needed=self.layers_needed, layer_cut=self.layer_cut, prune_output_layer=(False, []))
-        if self.quantization:
-            self.model = self.model.half()
+        # self.model = Backbone(model_id=self.model_id, layers_needed=self.layers_needed, layer_cut=self.layer_cut, prune_output_layer=(False, []))
+        # if self.quantization:
+        #     self.model = self.model.half()
 
         self.criterion = torch.nn.MSELoss(reduction='sum')
 
@@ -147,6 +147,11 @@ class PatchCore(pl.LightningModule):
         self.log_path = os.path.join(os.path.dirname(__file__), "results",f"{self.group_id}", "csv")
         if not os.path.exists(self.log_path):
             os.makedirs(self.log_path)
+        if self.cuda_active_training:
+            self.model = Backbone(model_id=self.model_id, layers_needed=self.layers_needed, layer_cut=self.layer_cut, prune_output_layer=(False, [])).cuda()
+        else:
+            self.model = Backbone(model_id=self.model_id, layers_needed=self.layers_needed, layer_cut=self.layer_cut, prune_output_layer=(False, []))
+        
         self.latences_filename = f'latences_{self.group_id}_{self.time_stamp}.csv'
         self.acc_filename = f'acc_{self.group_id}_{self.time_stamp}.csv'
         self.model.eval() # to stop running_var move (maybe not critical)        
@@ -201,7 +206,7 @@ class PatchCore(pl.LightningModule):
         total_embeddings = self.embedding_np
 
         if self.reduce_via_std:
-            percentile_std = 12.5*2
+            percentile_std = self.reduction_factor
             self.idx_chosen = np.argwhere(np.std(total_embeddings, axis=0)<np.percentile(np.std(total_embeddings,axis=0), percentile_std))[:,0]
             total_embeddings = np.take(total_embeddings, self.idx_chosen, axis=1)#total_embeddings[:,self.idx_with_high_std] # c contigous
         if self.normalize:
@@ -209,6 +214,7 @@ class PatchCore(pl.LightningModule):
             self.std = np.std(total_embeddings, axis=0)
             self.std = self.std + 1e-15
             total_embeddings = (total_embeddings-self.mean)/self.std
+            total_embeddings[:,self.std<1e-15] = 0.0
         if self.reduce_via_entropy:
             percentile_entropy = 100-self.reduction_factor
             total_embeddings_copy = total_embeddings.copy()

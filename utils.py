@@ -61,7 +61,14 @@ def modified_kNN_score_calc(score_patches, n_next_patches = 5):
     # weights = np.zeros(k)
     # weights[0] = 1
     
-    score_patches = score_patches[np.sum(score_patches,axis=1) < 1e12] 
+    # delete outliers
+    sum_of_each_patch = np.sum(score_patches,axis=1)
+    threshold_val = 20*np.percentile(sum_of_each_patch, 50)
+    non_outlier_patches = np.argwhere(sum_of_each_patch < threshold_val).flatten()#[0]
+    if len(non_outlier_patches) < score_patches.shape[0]:
+        score_patches = score_patches[non_outlier_patches]
+        print('deleted outliers: ', sum_of_each_patch.shape[0]-len(non_outlier_patches))
+    # score_patches = score_patches[np.sum(score_patches,axis=1) < 1e9] 
     k = score_patches.shape[1]
     
     # score_patches[score_patches >= 1e20] = 1e20
