@@ -75,6 +75,7 @@ class PatchCore(pl.LightningModule):
         self.layers_needed = [2,3]#,3]#,3]#,3]
         self.layer_cut = True
         self.prune_output_layer = (False, [])
+        self.exclude_relu = False
         
         # self.model = Backbone(model_id=self.model_id, layers_needed=self.layers_needed, layer_cut=self.layer_cut, prune_output_layer=(False, []))
         # if self.quantization:
@@ -148,9 +149,9 @@ class PatchCore(pl.LightningModule):
         if not os.path.exists(self.log_path):
             os.makedirs(self.log_path)
         if self.cuda_active_training:
-            self.model = Backbone(model_id=self.model_id, layers_needed=self.layers_needed, layer_cut=self.layer_cut, prune_output_layer=(False, [])).cuda()
+            self.model = Backbone(model_id=self.model_id, layers_needed=self.layers_needed, layer_cut=self.layer_cut, prune_output_layer=(False, []), exclude_relu=self.exclude_relu).cuda()
         else:
-            self.model = Backbone(model_id=self.model_id, layers_needed=self.layers_needed, layer_cut=self.layer_cut, prune_output_layer=(False, []))
+            self.model = Backbone(model_id=self.model_id, layers_needed=self.layers_needed, layer_cut=self.layer_cut, prune_output_layer=(False, []), exclude_relu=self.exclude_relu)
         
         self.latences_filename = f'latences_{self.group_id}_{self.time_stamp}.csv'
         self.acc_filename = f'acc_{self.group_id}_{self.time_stamp}.csv'
@@ -212,9 +213,9 @@ class PatchCore(pl.LightningModule):
         if self.normalize:
             self.mean = np.mean(total_embeddings, axis=0)
             self.std = np.std(total_embeddings, axis=0)
-            self.std = self.std + 1e-15
+            self.std = self.std + 5e-2*np.mean(self.std) # add 5% of mean to std to avoid division by zero
             total_embeddings = (total_embeddings-self.mean)/self.std
-            total_embeddings[:,self.std<1e-15] = 0.0
+            # total_embeddings[:,self.std<1e-15] = 0.0
         if self.reduce_via_entropy:
             percentile_entropy = 100-self.reduction_factor
             total_embeddings_copy = total_embeddings.copy()
@@ -565,7 +566,14 @@ class PatchCore(pl.LightningModule):
         if self.adapted_score_calc:
             score = modified_kNN_score_calc(score_patches=score_patches.astype(np.float64), n_next_patches=self.n_next_patches)
         else:
-            N_b = score_patches[np.argmax(score_patches[:,0])] # only the closest val is relevant for selection! # this changes with adapted version.
+            if True: # outlier removal
+                sum_of_each_patch = np.sum(score_patches,axis=1)
+                threshold_val = 50*np.percentile(sum_of_each_patch, 50)
+                non_outlier_patches = np.argwhere(sum_of_each_patch < threshold_val).flatten()#[0]
+                if len(non_outlier_patches) < score_patches.shape[0]:
+                    score_patches = score_patches[non_outlier_patches]
+                    print('deleted outliers: ', sum_of_each_patch.shape[0]-len(non_outlier_patches))
+            N_b = score_patches[np.argmax(score_patches[:,0])].astype(np.float128) # only the closest val is relevant for selection! # this changes with adapted version.
             w = (1 - (np.max(np.exp(N_b))/np.sum(np.exp(N_b))))
             score = w*max(score_patches[:,0]) # Image-level score #TODO --> meaning of numbers
         return score
@@ -630,6 +638,10 @@ class PatchCore(pl.LightningModule):
             pd_run_times.to_csv(file_path)
             print(f'\n\nMEAN INFERENCE TIME: {pd_run_times["#11 whole process cpu"].mean()} ms\n')
         if True:
+            # get backbone stats
+            summary_of_backbone = summary(self.model, (1, 3, self.load_size, self.load_size))#, device='cpu')
+            estimated_total_size = (summary_of_backbone.total_input + summary_of_backbone.total_output_bytes + summary_of_backbone.total_param_bytes) / 1e6 # in MB
+            number_of_mult_adds = summary_of_backbone.total_mult_adds / 1e6 # in M
             opt_dict = {
                 'backbone': self.model_id,
                 'pooling_strategy': str(self.pooling_strategy),
@@ -649,6 +661,8 @@ class PatchCore(pl.LightningModule):
                 'faiss_standard': self.faiss_standard,
                 'faiss_quantized': self.faiss_quantized,
                 'own_knn': self.own_knn,
+                'backbone_storage_[MB]': estimated_total_size,
+                'backbone_mult_adds_[M]': number_of_mult_adds,
                 'feature_extraction_[ms]': pd_run_times['#1 feature extraction cpu'].mean() if self.measure_inference else 0.0,
                 'embedding_of_features_[ms]': pd_run_times['#3 embedding of features cpu'].mean() if self.measure_inference else 0.0,
                 'calc_distances_[ms]': pd_run_times['#5 score patches cpu'].mean() if self.measure_inference else 0.0,

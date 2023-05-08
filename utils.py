@@ -63,7 +63,7 @@ def modified_kNN_score_calc(score_patches, n_next_patches = 5):
     
     # delete outliers
     sum_of_each_patch = np.sum(score_patches,axis=1)
-    threshold_val = 20*np.percentile(sum_of_each_patch, 50)
+    threshold_val = 50*np.percentile(sum_of_each_patch, 50)
     non_outlier_patches = np.argwhere(sum_of_each_patch < threshold_val).flatten()#[0]
     if len(non_outlier_patches) < score_patches.shape[0]:
         score_patches = score_patches[non_outlier_patches]
@@ -77,7 +77,7 @@ def modified_kNN_score_calc(score_patches, n_next_patches = 5):
     sorted_args = np.argsort(dists)
     score = np.zeros(n_next_patches)
     for p in range(1,n_next_patches+1):    
-        N_b = score_patches[sorted_args[-p]]
+        N_b = score_patches[sorted_args[-p]].astype(np.float128)
         exp_N_b = np.exp(N_b)
         # exp_N_b[exp_N_b >= 1e25] = 1e25
         exp_N_b_sum = np.sum(exp_N_b)

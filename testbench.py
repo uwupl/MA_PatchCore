@@ -63,9 +63,10 @@ if __name__ == '__main__':
     # feature extraction
     model.model_id = 'WRN50'
     model.layers_needed = [2,3]
-    model.pooling_strategy = 'default'
+    model.pooling_strategy = 'default' # nn.AvgPool2d(kernel_size=3, stride=1, padding=1)
+    model.exclude_relu = False # relu won't be used for final layer, in order to not lose negative values
     model.normalize = False # performs normalization on the feature vector; mean = 0, std = 1
-    # backbone adaptions
+    # backbone reduction
     model.layer_cut = False
     model.prune_output_layer = (False, [])
     # nearest neighbor search
@@ -84,8 +85,35 @@ if __name__ == '__main__':
     model.reduction_factor = 50 # only for reduce_via_std or reduce_via_entropy or reduce_via_entropy_normed
     
     # RUN
+    # run(model)
+    
+    # model.group_id = this_run_id + '_default_Patchcore_with_layer_cut'
+    # model.layer_cut = True
+    # run(model)
+    
+    model.group_id = this_run_id + '_default_Patchcore_with_layer_cut_and_normalizing'
+    model.normalize = True
     run(model)
     
+    model.group_id = this_run_id + '_default_Patchcore_with_layer_cut_and_adapted_pooling'
+    model.normalize = False
+    model.pooling_strategy = 'first_trial'
+    run(model)
     
+    model.group_id = this_run_id + '_default_Patchcore_with_layer_cut_and_double_pooling'
+    model.pooling_strategy = ['first_trial', 'max_1']
+    run(model)
+    
+    model.group_id = this_run_id + '_default_Patchcore_with_layer_cut_and_adapted_pooling_and_red_via_entropy'
+    model.pooling_strategy = 'first_trial'
+    model.reduce_via_entropy = True
+    run(model)
+    
+    model.group_id = this_run_id + '_default_Patchcore_with_layer_cut_and_double_pooling_and_red_via_entropy'
+    model.pooling_strategy = ['first_trial', 'max_1']
+    model.reduce_via_entropy = True
+    model.reduction_factor = 75
+    run(model)
+      
     
     
