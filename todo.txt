@@ -1,0 +1,8 @@
+- check entropy for negative vals! --> revisit shannon entropy
+- calc size of coreset
+- watch ram usage (psutil) and get max
+--> add them and visualize in plot
+- total automation of process
+- evaluate exclude_relu
+
+- VPN / remote access

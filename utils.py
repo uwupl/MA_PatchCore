@@ -1,6 +1,8 @@
 import numpy as np
 import numba as nb
 import pandas as pd
+import matplotlib as mpl
+import matplotlib.pyplot as plt
 import torch
 import cv2
 import os
@@ -175,4 +177,50 @@ def get_summary_df(this_run_dirs: list, res_path: str):
     index_list = [name[len(name.split('_')[0])+1:] for name in this_run_dirs]
     run_summary_df = pd.DataFrame(run_summary_dict, index=index_list)
     return run_summary_df
+
+def plot_results(labels, feature_extraction, embedding, search, calc_scores, own_auc, MVTechAD_auc, storage): #TODO storage
+    '''
+    visualizes results in bar chart
+    '''
+    for k in range(len(labels)):
+        labels[k] = labels[k] + '\n' + str(storage[k])
+    
+    x = np.arange(len(labels))  # the label locations
+    width = 0.4  # the width of the bars
+
+    fig, ax = plt.subplots(figsize=(20,10))
+    ax_2 = ax.twinx()
+    rects1 = ax.bar(x - 0.5*width, feature_extraction, width, label='feature extraction', color = 'crimson')
+    rects2 = ax.bar(x - 0.5*width, embedding, width, label='embedding', bottom=feature_extraction, color = 'purple')
+    rects3 = ax.bar(x - 0.5*width, search, width, label='search', bottom=list(np.array(embedding) + np.array(feature_extraction)), color = 'slateblue')
+    rects4 = ax.bar(x - 0.5*width, calc_scores, width, label='calc scores',bottom=list(np.array(embedding) + np.array(feature_extraction) + np.array(search)), color = 'darkgoldenrod')
+    # rects4 = ax.bar(x - 0.5*width, anomaly_map, width, label='anomaly map',bottom=list(np.array(embedding_cpu) + np.array(feature_extraction_cpu) + np.array(search_memory)), color = 'darkgoldenrod')
+    rects_1 = ax_2.bar(x + 0.25 * width, own_auc, width*0.3, label = 'Own Auc', color = 'black')
+    rects_2 = ax_2.bar(x + 0.75 * width, MVTechAD_auc, width*0.3, label = 'MVTechAD Auc', color = 'grey')
+    # rects5 = ax.bar(x + width, total_cpu, width, label='total')
+    # rects3 = ax.bar(x, )
+
+    # Add some text for labels, title and custom x-axis tick labels, etc.
+    ax.set_ylabel('elapsed time per sample [ms] (mean)')
+    ax.set_title('Process time for different feautures maps')
+    ax_2.set_ylabel('Auccarcy')
+    ax_2.yaxis.set_major_formatter(mpl.ticker.PercentFormatter())
+    ax.set_xticks(x, labels)
+    ax.legend()
+    ax_2.legend()
+
+    # ax.bar_label(rects1, padding=3)
+    # ax.bar_label(rects2, padding=3)
+    # ax.bar_label(rects3, padding=3)
+    ax.bar_label(rects4, padding=3, fmt='%1.3f')
+    ax_2.bar_label(rects_1, padding=3,fmt='%1.1f')
+    ax_2.bar_label(rects_2, padding=3,fmt='%1.1f')
+    ax_2.set_yticks([20,40,60,80,100])
+    ax_2.set
+
+    fig.tight_layout()
+
+    # plt.savefig(os.path.join(plot_dir, '13_adapt_max_pool.svg'), bbox_inches = 'tight')
+
+    plt.show()
 
