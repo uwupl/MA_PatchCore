@@ -1,5 +1,6 @@
 import numpy as np
 import numba as nb
+import pandas as pd
 import torch
 import cv2
 import os
@@ -102,3 +103,76 @@ def prep_dirs(root, category):
     source_code_save_path = os.path.join(root, 'src')
     os.makedirs(source_code_save_path, exist_ok=True)
     return embeddings_path, sample_path, source_code_save_path
+
+def get_summary_df(this_run_dirs: list, res_path: str):
+    '''
+    Takes a list of directories and returns a dataframe with the summary of all runs
+    '''
+    img_auc_total = np.array([])
+    img_auc_total_mean = np.array([])
+    img_auc_MVTechAD_total = np.array([])
+    img_auc_own = np.array([])
+    backbone_storage_total = np.array([])
+    backbone_flops_total = np.array([])
+    feature_extraction_total = np.array([])
+    embedding_of_feature_total = np.array([])   
+    calc_distances_total = np.array([]) 
+    calc_scores_total = np.array([])    
+    total_time_total = np.array([])
+    for k, run_dir in enumerate(this_run_dirs):
+        file_name = 'summary_' + run_dir + '.csv'
+        file_path = os.path.join(res_path, run_dir,'csv',file_name)
+        pd_summary = pd.read_csv(file_path, index_col=0)
+        img_auc = np.float32(pd_summary.loc['img_auc_[%]'].values)
+        img_auc_mean = np.mean(img_auc)
+        img_auc_own = img_auc[-1]
+        img_auc_MVTechAD = np.mean(img_auc[:-1])
+        backbone_storage = np.max(np.float32(pd_summary.loc['backbone_storage_[MB]'].values))
+        backbone_flops = np.max(np.float32(pd_summary.loc['backbone_mult_adds_[M]'].values))
+        feature_extraction = np.max(np.float32(pd_summary.loc['feature_extraction_[ms]'].values))
+        embedding_of_feature = np.max(np.float32(pd_summary.loc['embedding_of_features_[ms]'].values))
+        calc_distances = np.max(np.float32(pd_summary.loc['calc_distances_[ms]'].values))
+        calc_scores = np.max(np.float32(pd_summary.loc['calc_scores_[ms]'].values))
+        total_time = np.max(np.float32(pd_summary.loc['total_time_[ms]'].values))
+        if k == 0:
+            # img_auc_total = img_auc
+            img_auc_total_mean = img_auc_mean
+            img_auc_total_own = img_auc_own
+            img_auc_MVTechAD_total = img_auc_MVTechAD
+            backbone_storage_total = backbone_storage
+            backbone_flops_total = backbone_flops  
+            feature_extraction_total = feature_extraction
+            embedding_of_feature_total = embedding_of_feature
+            calc_distances_total = calc_distances
+            calc_scores_total = calc_scores
+            total_time_total = total_time
+        else:
+            # img_auc_total = np.vstack((img_auc_total, img_auc))
+            img_auc_total_mean = np.vstack((img_auc_total_mean, img_auc_mean))
+            img_auc_MVTechAD_total = np.vstack((img_auc_MVTechAD_total, img_auc_MVTechAD))
+            img_auc_total_own = np.vstack((img_auc_total_own, img_auc_own))
+            backbone_storage_total = np.vstack((backbone_storage_total, backbone_storage))
+            backbone_flops_total = np.vstack((backbone_flops_total, backbone_flops))
+            feature_extraction_total = np.vstack((feature_extraction_total, feature_extraction))
+            embedding_of_feature_total = np.vstack((embedding_of_feature_total, embedding_of_feature))
+            calc_distances_total = np.vstack((calc_distances_total, calc_distances))
+            calc_scores_total = np.vstack((calc_scores_total, calc_scores))
+            total_time_total = np.vstack((total_time_total, total_time))
+
+    summary_np = np.zeros((10, len(img_auc_total_mean)))
+    helper_list = [img_auc_total_mean, img_auc_MVTechAD_total, img_auc_total_own, backbone_storage_total, backbone_flops_total, feature_extraction_total, embedding_of_feature_total, calc_distances_total, calc_scores_total, total_time]
+    for i, entry in enumerate(helper_list):
+        summary_np[i, :] = entry.flatten()
+    run_summary_dict = {}
+    for k in range(len(img_auc_total_mean)):
+        print(k)
+        for a, b in zip(summary_np[:,k].flatten(), ['img_auc_mean', 'img_auc_MVTechAD', 'img_auc_own','backbone_storage', 'backbone_flops', 'feature_extraction', 'embedding_of_feature', 'calc_distances', 'calc_scores', 'total_time']):
+            if k == 0:
+                run_summary_dict[b] = [float(a)]
+            else:
+                run_summary_dict[b] += [float(a)]
+
+    index_list = [name[len(name.split('_')[0])+1:] for name in this_run_dirs]
+    run_summary_df = pd.DataFrame(run_summary_dict, index=index_list)
+    return run_summary_df
+
