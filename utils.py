@@ -7,6 +7,7 @@ import torch
 import cv2
 import os
 import warnings
+import time
 
 def cvt2heatmap(gray):
     heatmap = cv2.applyColorMap(np.uint8(gray), cv2.COLORMAP_JET)
@@ -106,11 +107,12 @@ def prep_dirs(root, category):
     os.makedirs(source_code_save_path, exist_ok=True)
     return embeddings_path, sample_path, source_code_save_path
 
-def get_summary_df(this_run_dirs: list, res_path: str):
+def get_summary_df(this_run_id: str, res_path: str, save_df = False):
     '''
-    Takes a list of directories and returns a dataframe with the summary of all runs
+    Takes a run_id, reads all files and returns a dataframe with the summary of all runs
     '''
-    img_auc_total = np.array([])
+    all_items_in_results = os.listdir(res_path)
+    this_run_dirs = [this_dir for this_dir in all_items_in_results if this_dir.startswith(this_run_id)]
     img_auc_total_mean = np.array([])
     img_auc_MVTechAD_total = np.array([])
     img_auc_own = np.array([])
@@ -174,53 +176,87 @@ def get_summary_df(this_run_dirs: list, res_path: str):
             else:
                 run_summary_dict[b] += [float(a)]
 
-    index_list = [name[len(name.split('_')[0])+1:] for name in this_run_dirs]
+    index_list = [name[len(this_run_id)+1:] for name in this_run_dirs]
     run_summary_df = pd.DataFrame(run_summary_dict, index=index_list)
+    if save_df:
+        file_path = os.path.join(res_path, 'csv', f'{int(time.time())}_summary_of_this_{this_run_id}.csv')
+        run_summary_df.to_csv(file_path, index=False)
     return run_summary_df
 
-def plot_results(labels, feature_extraction, embedding, search, calc_scores, own_auc, MVTechAD_auc, storage): #TODO storage
+def plot_results(labels, feature_extraction, embedding, search, calc_scores, own_auc, MVTechAD_auc, storage, fig_size = (20,10), title = 'Comparison', only_auc = False, width = 0.4, save_fig = False, res_path = r'/mnt/crucial/UNI/IIIT_Muen/MA/code/productive/MA_PatchCore/results/plots/', show = True):
     '''
     visualizes results in bar chart
     '''
     for k in range(len(labels)):
-        labels[k] = labels[k] + '\n' + str(storage[k])
+        labels[k] = labels[k] + '\n' + str(round(storage[k],1))
     
     x = np.arange(len(labels))  # the label locations
-    width = 0.4  # the width of the bars
+    width = width  # the width of the bars
 
-    fig, ax = plt.subplots(figsize=(20,10))
-    ax_2 = ax.twinx()
-    rects1 = ax.bar(x - 0.5*width, feature_extraction, width, label='feature extraction', color = 'crimson')
-    rects2 = ax.bar(x - 0.5*width, embedding, width, label='embedding', bottom=feature_extraction, color = 'purple')
-    rects3 = ax.bar(x - 0.5*width, search, width, label='search', bottom=list(np.array(embedding) + np.array(feature_extraction)), color = 'slateblue')
-    rects4 = ax.bar(x - 0.5*width, calc_scores, width, label='calc scores',bottom=list(np.array(embedding) + np.array(feature_extraction) + np.array(search)), color = 'darkgoldenrod')
-    # rects4 = ax.bar(x - 0.5*width, anomaly_map, width, label='anomaly map',bottom=list(np.array(embedding_cpu) + np.array(feature_extraction_cpu) + np.array(search_memory)), color = 'darkgoldenrod')
-    rects_1 = ax_2.bar(x + 0.25 * width, own_auc, width*0.3, label = 'Own Auc', color = 'black')
-    rects_2 = ax_2.bar(x + 0.75 * width, MVTechAD_auc, width*0.3, label = 'MVTechAD Auc', color = 'grey')
-    # rects5 = ax.bar(x + width, total_cpu, width, label='total')
-    # rects3 = ax.bar(x, )
+    fig, ax = plt.subplots(figsize=fig_size)
+    if not only_auc:
+        ax_2 = ax.twinx()
+        rects1 = ax.bar(x - 0.5*width, feature_extraction, width, label='feature extraction', color = 'crimson')
+        rects2 = ax.bar(x - 0.5*width, embedding, width, label='embedding', bottom=feature_extraction, color = 'purple')
+        rects3 = ax.bar(x - 0.5*width, search, width, label='search', bottom=list(np.array(embedding) + np.array(feature_extraction)), color = 'slateblue')
+        rects4 = ax.bar(x - 0.5*width, calc_scores, width, label='calc scores',bottom=list(np.array(embedding) + np.array(feature_extraction) + np.array(search)), color = 'darkgoldenrod')
+        # rects4 = ax.bar(x - 0.5*width, anomaly_map, width, label='anomaly map',bottom=list(np.array(embedding_cpu) + np.array(feature_extraction_cpu) + np.array(search_memory)), color = 'darkgoldenrod')
+        rects_1 = ax_2.bar(x + 0.25 * width, own_auc, width*0.3, label = 'Own Auc', color = 'black')
+        rects_2 = ax_2.bar(x + 0.75 * width, MVTechAD_auc, width*0.3, label = 'MVTechAD Auc', color = 'grey')
+        # rects5 = ax.bar(x + width, total_cpu, width, label='total')
+        # rects3 = ax.bar(x, )
 
-    # Add some text for labels, title and custom x-axis tick labels, etc.
-    ax.set_ylabel('elapsed time per sample [ms] (mean)')
-    ax.set_title('Process time for different feautures maps')
-    ax_2.set_ylabel('Auccarcy')
-    ax_2.yaxis.set_major_formatter(mpl.ticker.PercentFormatter())
-    ax.set_xticks(x, labels)
-    ax.legend()
-    ax_2.legend()
+        # Add some text for labels, title and custom x-axis tick labels, etc.
+        ax.set_ylabel('elapsed time per sample [ms] (mean)')
+        ax.set_title(title)
+        ax_2.set_ylabel('Auccarcy')
+        ax_2.yaxis.set_major_formatter(mpl.ticker.PercentFormatter())
+        ax.set_xticks(x, labels)
+        ax.legend()
+        ax_2.legend()
 
-    # ax.bar_label(rects1, padding=3)
-    # ax.bar_label(rects2, padding=3)
-    # ax.bar_label(rects3, padding=3)
-    ax.bar_label(rects4, padding=3, fmt='%1.3f')
-    ax_2.bar_label(rects_1, padding=3,fmt='%1.1f')
-    ax_2.bar_label(rects_2, padding=3,fmt='%1.1f')
-    ax_2.set_yticks([20,40,60,80,100])
-    ax_2.set
-
+        # ax.bar_label(rects1, padding=3)
+        # ax.bar_label(rects2, padding=3)
+        # ax.bar_label(rects3, padding=3)
+        ax.bar_label(rects4, padding=3, fmt='%1.3f')
+        ax_2.bar_label(rects_1, padding=3,fmt='%1.1f')
+        ax_2.bar_label(rects_2, padding=3,fmt='%1.1f')
+        ax_2.set_yticks([20,40,60,80,100])
+        ax_2.set
+    else:
+        rects_1 = ax.bar(x - 0.5*width, own_auc, width, label = 'Own Auc', color = 'black')
+        rects_2 = ax.bar(x + 0.5*width, MVTechAD_auc, width, label = 'MVTechAD Auc', color = 'grey')
+        ax.set_ylabel('Auccarcy')
+        ax.yaxis.set_major_formatter(mpl.ticker.PercentFormatter())
+        ax.set_title(title)
+        ax.set_xticks(x, labels)
+        ax.legend()
+        ax.bar_label(rects_1, padding=3,fmt='%1.1f')
+        ax.bar_label(rects_2, padding=3,fmt='%1.1f')
+        ax.set_yticks([20,40,60,80,100])
+    
     fig.tight_layout()
 
-    # plt.savefig(os.path.join(plot_dir, '13_adapt_max_pool.svg'), bbox_inches = 'tight')
-
-    plt.show()
+    if save_fig:
+        file_name = str(time.time()) + title.replace(' ', '_') + '_' + '.svg'
+        if not os.path.exists(res_path):
+            os.makedirs(res_path) 
+        plt.savefig(os.path.join(res_path, file_name), bbox_inches = 'tight')
+        
+    if show:
+        plt.show()
+        
+def extract_vals_for_plot(summary_df: pd.DataFrame):
+    '''
+    Takes pandas DataFrame and extracts values for plotting
+    '''
+    labels = np.array(summary_df.index, dtype=str)
+    feature_extraction = summary_df.loc[:, 'feature_extraction'].values
+    embedding = summary_df.loc[:, 'embedding_of_feature'].values
+    search = summary_df.loc[:, 'calc_distances'].values
+    calc_distances = summary_df.loc[:, 'calc_scores'].values
+    own_auc = summary_df.loc[:, 'img_auc_own'].values*100
+    MVTechAD_auc = summary_df.loc[:, 'img_auc_MVTechAD'].values*100
+    storage = summary_df.loc[:, 'backbone_storage'].values
+    return labels, feature_extraction, embedding, search, calc_distances, own_auc, MVTechAD_auc, storage
 
