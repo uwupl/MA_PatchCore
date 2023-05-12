@@ -264,6 +264,8 @@ class PatchCore(pl.LightningModule):
         print('initial embedding size : ', total_embeddings.shape)
         print('final embedding size : ', self.embedding_coreset.shape)
         #faiss
+        if self.n_neighbors > self.embedding_coreset.shape[0]:
+            self.n_neighbors = self.embedding_coreset.shape[0]
         if self.faiss_quantized:
             # if False:
             nlist = 20 if self.embedding_coreset.shape[0] > 20 else self.embedding_coreset.shape[0]
@@ -627,8 +629,8 @@ class PatchCore(pl.LightningModule):
         img_auc = roc_auc_score(self.gt_list_img_lvl, self.pred_list_img_lvl)
         print(img_auc)
         print('test_epoch_end')
-        values = {'pixel_auc': pixel_auc, 'img_auc': img_auc}
-        self.log_dict(values)
+        # values = {'pixel_auc': pixel_auc, 'img_auc': img_auc}
+        # self.log_dict(values) # consumes a lot of storage!
         # own logging
         if self.measure_inference:
             file_path = os.path.join(self.log_path, self.latences_filename)
@@ -647,6 +649,7 @@ class PatchCore(pl.LightningModule):
                 'pooling_strategy': str(self.pooling_strategy),
                 'layers_needed': self.layers_needed,
                 'layer_cut': self.layer_cut,
+                'exclude_relu': self.exclude_relu,
                 'prune_output_layer': f'{self.prune_output_layer[0]} #{len(self.prune_output_layer[1])}',
                 'adapted_score_calc': self.adapted_score_calc,
                 'n_neighbors': self.n_neighbors,

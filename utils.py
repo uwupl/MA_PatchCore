@@ -59,23 +59,13 @@ def modified_kNN_score_calc_old(score_patches):
 
 # @nb.jit(nopython=True)
 def modified_kNN_score_calc(score_patches, n_next_patches = 5):
-    
-    # weights = np.divide(np.array([(k-i) for i in range(k)]), ((k-1)*k)/2)
-    # weights = np.ones(k)
-    # weights = np.zeros(k)
-    # weights[0] = 1
-    
-    # delete outliers
     sum_of_each_patch = np.sum(score_patches,axis=1)
     threshold_val = 50*np.percentile(sum_of_each_patch, 50)
     non_outlier_patches = np.argwhere(sum_of_each_patch < threshold_val).flatten()#[0]
     if len(non_outlier_patches) < score_patches.shape[0]:
         score_patches = score_patches[non_outlier_patches]
         print('deleted outliers: ', sum_of_each_patch.shape[0]-len(non_outlier_patches))
-    # score_patches = score_patches[np.sum(score_patches,axis=1) < 1e9] 
     k = score_patches.shape[1]
-    
-    # score_patches[score_patches >= 1e20] = 1e20
     weights = np.array([(k-i)**2 for i in range(k)])#np.divide(np.array([(k-i)**2 for i in range(k)]), 1, dtype=np.float64) # Summe(i²) = (k*(k+1)*(2*k+1))/6
     dists = np.sum(np.multiply(score_patches, weights), axis=1, dtype=np.float64)
     sorted_args = np.argsort(dists)
@@ -95,6 +85,39 @@ def modified_kNN_score_calc(score_patches, n_next_patches = 5):
         score[p-1] =  w*dists[sorted_args[-p]]
     return np.mean(score)
 
+@nb.jit(nopython=True)
+def modified_kNN_score_calc_numba(score_patches, n_next_patches = 5, outlier_deletion = True, outlier_factor = 50):
+    '''
+    numba version of adapted score calculation
+    '''
+    if outlier_deletion:
+        sum_of_each_patch = np.sum(score_patches,axis=1)
+        threshold_val = outlier_factor*np.percentile(sum_of_each_patch, 50)
+        non_outlier_patches = np.argwhere(sum_of_each_patch < threshold_val).flatten()#[0]
+        if len(non_outlier_patches) < score_patches.shape[0]:
+            score_patches = score_patches[non_outlier_patches]
+            print('deleted outliers: ', sum_of_each_patch.shape[0]-len(non_outlier_patches))
+    k = score_patches.shape[1]
+    weights = np.array([(k-i)**2 for i in range(k)])#np.divide(np.array([(k-i)**2 for i in range(k)]), 1, dtype=np.float64) # Summe(i²) = (k*(k+1)*(2*k+1))/6
+    dists = np.sum(np.multiply(score_patches, weights), axis=1, dtype=np.float64)
+    sorted_args = np.argsort(dists)
+    score = np.zeros(n_next_patches)
+    for p in range(1,n_next_patches+1):    
+        N_b = score_patches[sorted_args[-p]].astype(np.float64)
+        exp_N_b = np.exp(N_b)
+        # exp_N_b[exp_N_b >= 1e25] = 1e25
+        exp_N_b_sum = np.sum(exp_N_b)
+        # with warnings.catch_warnings():
+        #     warnings.filterwarnings('error')
+        #     try:
+        softmax = np.divide(np.max(exp_N_b), exp_N_b_sum)
+            # except:
+                # softmax = 1.0
+        w = np.float64(1.0 - softmax)
+        score[p-1] =  w*dists[sorted_args[-p]]
+    return np.mean(score)
+
+
 def prep_dirs(root, category):
     # make embeddings dir
     embeddings_path = os.path.join('./', 'embeddings', category)
@@ -111,6 +134,9 @@ def get_summary_df(this_run_id: str, res_path: str, save_df = False):
     '''
     Takes a run_id, reads all files and returns a dataframe with the summary of all runs
     '''
+    failed_runs = []
+    correction_number = 0
+    
     all_items_in_results = os.listdir(res_path)
     this_run_dirs = [this_dir for this_dir in all_items_in_results if this_dir.startswith(this_run_id)]
     img_auc_total_mean = np.array([])
@@ -126,7 +152,19 @@ def get_summary_df(this_run_id: str, res_path: str, save_df = False):
     for k, run_dir in enumerate(this_run_dirs):
         file_name = 'summary_' + run_dir + '.csv'
         file_path = os.path.join(res_path, run_dir,'csv',file_name)
-        pd_summary = pd.read_csv(file_path, index_col=0)
+        try:
+            pd_summary = pd.read_csv(file_path, index_col=0)
+            if pd_summary.shape[1] != int(16):
+                print(k)
+                print(file_path)
+                failed_runs.append(k)
+                correction_number += 1
+                continue
+        except:
+            print('file not found: ', file_path)
+            failed_runs.append(k)
+            correction_number += 1
+            continue
         img_auc = np.float32(pd_summary.loc['img_auc_[%]'].values)
         img_auc_mean = np.mean(img_auc)
         img_auc_own = img_auc[-1]
@@ -138,7 +176,7 @@ def get_summary_df(this_run_id: str, res_path: str, save_df = False):
         calc_distances = np.max(np.float32(pd_summary.loc['calc_distances_[ms]'].values))
         calc_scores = np.max(np.float32(pd_summary.loc['calc_scores_[ms]'].values))
         total_time = np.max(np.float32(pd_summary.loc['total_time_[ms]'].values))
-        if k == 0:
+        if (k - correction_number) == 0:
             # img_auc_total = img_auc
             img_auc_total_mean = img_auc_mean
             img_auc_total_own = img_auc_own
@@ -169,14 +207,14 @@ def get_summary_df(this_run_id: str, res_path: str, save_df = False):
         summary_np[i, :] = entry.flatten()
     run_summary_dict = {}
     for k in range(len(img_auc_total_mean)):
-        print(k)
+        # print(k)
         for a, b in zip(summary_np[:,k].flatten(), ['img_auc_mean', 'img_auc_MVTechAD', 'img_auc_own','backbone_storage', 'backbone_flops', 'feature_extraction', 'embedding_of_feature', 'calc_distances', 'calc_scores', 'total_time']):
             if k == 0:
                 run_summary_dict[b] = [float(a)]
             else:
                 run_summary_dict[b] += [float(a)]
 
-    index_list = [name[len(this_run_id)+1:] for name in this_run_dirs]
+    index_list = [name[len(this_run_id):] for k, name in enumerate(this_run_dirs) if k not in failed_runs]
     run_summary_df = pd.DataFrame(run_summary_dict, index=index_list)
     if save_df:
         file_path = os.path.join(res_path, 'csv', f'{int(time.time())}_summary_of_this_{this_run_id}.csv')
@@ -188,12 +226,13 @@ def plot_results(labels, feature_extraction, embedding, search, calc_scores, own
     visualizes results in bar chart
     '''
     for k in range(len(labels)):
+        labels[k] = labels[k]
         labels[k] = labels[k] + '\n' + str(round(storage[k],1))
     
     x = np.arange(len(labels))  # the label locations
     width = width  # the width of the bars
 
-    fig, ax = plt.subplots(figsize=fig_size)
+    fig, ax = plt.subplots(figsize=fig_size, dpi=300)
     if not only_auc:
         ax_2 = ax.twinx()
         rects1 = ax.bar(x - 0.5*width, feature_extraction, width, label='feature extraction', color = 'crimson')
@@ -238,7 +277,7 @@ def plot_results(labels, feature_extraction, embedding, search, calc_scores, own
     fig.tight_layout()
 
     if save_fig:
-        file_name = str(time.time()) + title.replace(' ', '_') + '_' + '.svg'
+        file_name = str(int(time.time())) + title.replace(' ', '_') + '_' + '.svg'
         if not os.path.exists(res_path):
             os.makedirs(res_path) 
         plt.savefig(os.path.join(res_path, file_name), bbox_inches = 'tight')
