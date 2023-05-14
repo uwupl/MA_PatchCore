@@ -100,14 +100,15 @@ if __name__ == '__main__':
     model.own_knn = False
     
     run_counter = 0
-    total_runs = 6*3*15*10
+    total_runs = 4*3*15*4
+    reduction_factors = [25,50,75,100]
     for model_type in ['RN18', 'RN34','WRN50']:
         for layers_needed in [[1], [2], [3], [4], [1,2], [1,3], [1,4], [2,3], [2,4], [3,4], [1,2,3], [1,2,4], [1,3,4], [2,3,4], [1,2,3,4]]:
             np.save(os.path.join(res_path, f'{this_run_id}_failed_runs.npy'), failed_runs)
             model.exclude_relu = False
             model.reduce_via_entropy = True
             model.model_id = model_type
-            reduction_factors = [10, 20, 30, 40, 50, 60, 70, 80, 90, 100]
+            model.layers_needed = layers_needed
             for factor in reduction_factors:
                 model.reduction_factor = factor
                 layers_str = '_'.join(str(x) for x in layers_needed)
@@ -125,6 +126,7 @@ if __name__ == '__main__':
             model.reduce_via_entropy = False
             model.reduce_via_entropy_normed = True
             model.model_id = model_type
+            model.layers_needed = layers_needed
             for factor in reduction_factors:
                 model.reduction_factor = factor
                 layers_str = '_'.join(str(x) for x in layers_needed)
@@ -143,6 +145,7 @@ if __name__ == '__main__':
             model.reduce_via_entropy_normed = False
             model.reduce_via_std = True
             model.model_id = model_type
+            model.layers_needed = layers_needed
             for factor in reduction_factors:
                 model.reduction_factor = factor
                 layers_str = '_'.join(str(x) for x in layers_needed)
@@ -156,28 +159,30 @@ if __name__ == '__main__':
                         failed_runs = np.append(failed_runs, model.group_id)
                         print('FAILED: ', model.group_id)
                         
-            model.exclude_relu = False
-            model.sigmoid_in_last_layer = True
-            model.reduce_via_entropy = True
-            model.model_id = model_type
-            # reduction_factors = [10, 20, 30, 40, 50, 60, 70, 80, 90]
-            for factor in reduction_factors:
-                model.reduction_factor = factor
-                layers_str = '_'.join(str(x) for x in layers_needed)
-                model.group_id = this_run_id + f'with_Sigmoid_{model_type}_reduced_entropy_{factor}_layers_{layers_str}'
-                if not os.path.exists(os.path.join(res_path, model.group_id)):
-                    try:
-                        print('Run ', run_counter+1, ' of ', total_runs, ' started.')
-                        run(model, True)
-                        run_counter += 1
-                    except:
-                        failed_runs = np.append(failed_runs, model.group_id)
-                        print('FAILED: ', model.group_id)
+            # model.exclude_relu = False
+            # model.sigmoid_in_last_layer = True
+            # model.reduce_via_entropy = True
+            # model.model_id = model_type
+            # model.layers_needed = layers_needed
+            # # reduction_factors = [10, 20, 30, 40, 50, 60, 70, 80, 90]
+            # for factor in reduction_factors:
+            #     model.reduction_factor = factor
+            #     layers_str = '_'.join(str(x) for x in layers_needed)
+            #     model.group_id = this_run_id + f'with_Sigmoid_{model_type}_reduced_entropy_{factor}_layers_{layers_str}'
+            #     if not os.path.exists(os.path.join(res_path, model.group_id)):
+            #         try:
+            #             print('Run ', run_counter+1, ' of ', total_runs, ' started.')
+            #             run(model, True)
+            #             run_counter += 1
+            #         except:
+            #             failed_runs = np.append(failed_runs, model.group_id)
+            #             print('FAILED: ', model.group_id)
                         
             model.exclude_relu = False
             model.reduce_via_entropy = False
             model.reduce_via_entropy_normed = True
             model.model_id = model_type
+            model.layers_needed = layers_needed
             for factor in reduction_factors:
                 model.reduction_factor = factor
                 layers_str = '_'.join(str(x) for x in layers_needed)
@@ -191,23 +196,24 @@ if __name__ == '__main__':
                         failed_runs = np.append(failed_runs, model.group_id)
                         print('FAILED: ', model.group_id)
 
-            model.exclude_relu = False
-            model.reduce_via_entropy = False
-            model.reduce_via_entropy_normed = False
-            model.reduce_via_std = True
-            model.model_id = model_type
-            for factor in reduction_factors:
-                model.reduction_factor = factor
-                layers_str = '_'.join(str(x) for x in layers_needed)
-                model.group_id = this_run_id + f'with_Sigmoid_{model_type}_reduced_std_{factor}_layers_{layers_str}'
-                if not os.path.exists(os.path.join(res_path, model.group_id)):
-                    try:
-                        print('Run ', run_counter+1, ' of ', total_runs, ' started.')
-                        run(model, True)
-                        run_counter += 1
-                    except:
-                        failed_runs = np.append(failed_runs, model.group_id)
-                        print('FAILED: ', model.group_id)
+            # model.exclude_relu = False
+            # model.reduce_via_entropy = False
+            # model.reduce_via_entropy_normed = False
+            # model.reduce_via_std = True
+            # model.layers_needed = layers_needed
+            # model.model_id = model_type
+            # for factor in reduction_factors:
+            #     model.reduction_factor = factor
+            #     layers_str = '_'.join(str(x) for x in layers_needed)
+            #     model.group_id = this_run_id + f'with_Sigmoid_{model_type}_reduced_std_{factor}_layers_{layers_str}'
+            #     if not os.path.exists(os.path.join(res_path, model.group_id)):
+            #         try:
+            #             print('Run ', run_counter+1, ' of ', total_runs, ' started.')
+            #             run(model, True)
+            #             run_counter += 1
+            #         except:
+            #             failed_runs = np.append(failed_runs, model.group_id)
+            #             print('FAILED: ', model.group_id)
 
     print('Failed runs: ', failed_runs)
         
