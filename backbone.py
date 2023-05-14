@@ -12,6 +12,7 @@ class Backbone(nn.Module):
         layer_cut: bool,
         prune_output_layer: Tuple[bool, List[int]] = (False, []),
         exclude_relu: bool = False,
+        sigmoid_in_last_layer: bool = False,
     ) -> None:
         super().__init__()
         self.model_id = model_id
@@ -19,6 +20,7 @@ class Backbone(nn.Module):
         self.layer_cut = layer_cut
         self.prune_output_layer = prune_output_layer
         self.exclude_relu = exclude_relu
+        self.sigmoid_in_last_layer = sigmoid_in_last_layer
         self.init_features()
         
         if self.model_id.__contains__('WRN50'):
@@ -32,6 +34,10 @@ class Backbone(nn.Module):
         elif self.model_id.__contains__('RN18'):
             weights = models.ResNet18_Weights.DEFAULT
             self.model = models.resnet18(weights=weights)
+            self.procedure_resnet()
+        elif self.model_id.__contains__('RN34'):
+            weights = models.ResNet34_Weights.DEFAULT
+            self.model = models.resnet34(weights=weights)
             self.procedure_resnet()
             
         elif self.model_id.__contains__('CX_XS'):
@@ -132,15 +138,9 @@ class Backbone(nn.Module):
                 input_size = (1,1024,7,7)
             
             if len(self.layers_needed) > 1:
-                if not self.exclude_relu:
-                    output_layer = OwnBottleneck(dict_1, dict_2, dict_3, self.selected_idx_dict[max(self.layers_needed)], input_size)
-                else:
-                    output_layer = OwnBottleneck_wo_ReLu(dict_1, dict_2, dict_3, self.selected_idx_dict[max(self.layers_needed)], input_size, exclude_relu=True)
+                output_layer = OwnBottleneck(dict_1, dict_2, dict_3, self.selected_idx_dict[max(self.layers_needed)], input_size, self.exclude_relu, self.sigmoid_in_last_layer)
             else:
-                if not self.exclude_relu:
-                    output_layer = OwnBottleneck(dict_1, dict_2, dict_3, self.prune_output_layer[1], input_size)
-                else:
-                    output_layer = OwnBottleneck_wo_ReLu(dict_1, dict_2, dict_3, self.prune_output_layer[1], input_size, exclude_relu=True)
+                output_layer = OwnBottleneck(dict_1, dict_2, dict_3, self.prune_output_layer[1], input_size, self.exclude_relu, self.sigmoid_in_last_layer)
             del self.model
             self.model = nn.Sequential(layers_1, layers_2, output_layer)
             
@@ -177,15 +177,9 @@ class Backbone(nn.Module):
             elif layer_to_include == int(4):
                 input_size = (1,512,7,7)
             if len(self.layers_needed) > 1:
-                if not self.exclude_relu:
-                    output_layer = OwnBasicblock(dict_1, dict_2, self.selected_idx_dict[max(self.layers_needed)], input_size)
-                else:
-                    output_layer = OwnBasicblock_wo_ReLu(dict_1, dict_2, self.selected_idx_dict[max(self.layers_needed)], input_size)
+                output_layer = OwnBasicblock(dict_1, dict_2, self.selected_idx_dict[max(self.layers_needed)], input_size, self.exclude_relu, self.sigmoid_in_last_layer)
             else:
-                if not self.exclude_relu:
-                    output_layer = OwnBasicblock(dict_1, dict_2, self.prune_output_layer[1], input_size)
-                else:                    
-                    output_layer = OwnBasicblock_wo_ReLu(dict_1, dict_2, self.prune_output_layer[1], input_size)   
+                output_layer = OwnBasicblock(dict_1, dict_2, self.prune_output_layer[1], input_size, self.exclude_relu, self.sigmoid_in_last_layer)  
             del self.model
             self.model = nn.Sequential(layers_1, layers_2, output_layer)
             
@@ -225,7 +219,7 @@ class Backbone(nn.Module):
 
 
 class OwnBottleneck(torch.nn.Module):
-    def __init__(self, block_1, block_2, block_3, idx_selected, input_size):
+    def __init__(self, block_1, block_2, block_3, idx_selected, input_size, exclude_relu = False, sigmoid_in_last_layer=False):
         '''
         just pass OderedDicts, bottleneck like layer is created. For ResNet with Bottlenecks. 
         '''
@@ -234,6 +228,12 @@ class OwnBottleneck(torch.nn.Module):
         self.block_2 = torch.nn.Sequential(block_2)
         self.block_3 = torch.nn.Sequential(block_3)
         self.relu = torch.nn.ReLU(inplace=True)
+        if exclude_relu:
+            self.output_activation = torch.nn.Identity(inplace=True)
+        elif sigmoid_in_last_layer:
+            self.output_activation = torch.nn.Sigmoid(inplace=True)
+        else:
+            self.output_activation = torch.nn.ReLU(inplace=True)
         self.idx_selected = idx_selected
         if len(self.idx_selected) > 0:
             channels_not_selected = [i for i in range(input_size[1]*2) if i not in self.idx_selected]
@@ -256,19 +256,26 @@ class OwnBottleneck(torch.nn.Module):
         identity = identity[:,self.idx_selected,...]
         
         out += identity
-        out = self.relu(out)
+        out = self.output_activation(out)
                 
         return out
     
 class OwnBasicblock(torch.nn.Module):
-    def __init__(self, block_1, block_2, idx_selected, input_size):
+    def __init__(self, block_1, block_2, idx_selected, input_size, exclude_relu = False, sigmoid_in_last_layer=False):
         '''
         just pass OderedDicts, bottleneck like layer is created. For ResNet with Basicblocks. 
         '''
         super().__init__()
         self.block_1 = torch.nn.Sequential(block_1)
         self.block_2 = torch.nn.Sequential(block_2)
-        self.relu = torch.nn.ReLU(inplace=True)
+        if exclude_relu:
+            self.output_activation = torch.nn.Identity(inplace=True)
+        elif sigmoid_in_last_layer:
+            self.output_activation = torch.nn.Sigmoid(inplace=True)
+        else:
+            self.output_activation = torch.nn.ReLU(inplace=True)
+        # self.output_activation = 
+        self.sigmoid = torch.nn.Sigmoid(inplace=True)
         self.idx_selected = idx_selected
         if len(self.idx_selected) > 0:
             channels_not_selected = [i for i in range(input_size[1]) if i not in self.idx_selected]
@@ -284,67 +291,68 @@ class OwnBasicblock(torch.nn.Module):
         out = self.block_2(out)
         identity = identity[:,self.idx_selected,...]
         out += identity
-        out = self.relu(out)
+        out = self.output_activation(out)
+        # out = self.relu(out)
         return out
     
     
-class OwnBottleneck_wo_ReLu(torch.nn.Module):
-    def __init__(self, block_1, block_2, block_3, idx_selected, input_size):
-        '''
-        just pass OderedDicts, bottleneck like layer is created. For ResNet with Bottlenecks. 
-        '''
-        super().__init__()
-        self.block_1 = torch.nn.Sequential(block_1)
-        self.block_2 = torch.nn.Sequential(block_2)
-        self.block_3 = torch.nn.Sequential(block_3)
-        # self.relu = torch.nn.ReLU(inplace=True)
-        self.idx_selected = idx_selected
-        channels_not_selected = [i for i in range(input_size[1]*2) if i not in self.idx_selected]
-        DG = tp.DependencyGraph().build_dependency(self.block_3, example_inputs=torch.rand(input_size))
-        group = DG.get_pruning_group(self.block_3.final_4, tp.prune_conv_out_channels, idxs=channels_not_selected)
-        print(group)
-        if DG.check_pruning_group(group): # avoid full pruning, i.e., channels=0.  
-            group.prune()
+# class OwnBottleneck_wo_ReLu(torch.nn.Module):
+#     def __init__(self, block_1, block_2, block_3, idx_selected, input_size):
+#         '''
+#         just pass OderedDicts, bottleneck like layer is created. For ResNet with Bottlenecks. 
+#         '''
+#         super().__init__()
+#         self.block_1 = torch.nn.Sequential(block_1)
+#         self.block_2 = torch.nn.Sequential(block_2)
+#         self.block_3 = torch.nn.Sequential(block_3)
+#         # self.relu = torch.nn.ReLU(inplace=True)
+#         self.idx_selected = idx_selected
+#         channels_not_selected = [i for i in range(input_size[1]*2) if i not in self.idx_selected]
+#         DG = tp.DependencyGraph().build_dependency(self.block_3, example_inputs=torch.rand(input_size))
+#         group = DG.get_pruning_group(self.block_3.final_4, tp.prune_conv_out_channels, idxs=channels_not_selected)
+#         print(group)
+#         if DG.check_pruning_group(group): # avoid full pruning, i.e., channels=0.  
+#             group.prune()
         
-    def forward(self, x):
-        identity = x
+#     def forward(self, x):
+#         identity = x
         
-        out = self.block_1(x)
-        out = self.relu(out)
+#         out = self.block_1(x)
+#         out = self.relu(out)
         
-        out = self.block_2(out)
-        out = self.relu(out)
+#         out = self.block_2(out)
+#         out = self.relu(out)
         
-        out = self.block_3(out)
-        identity = identity[:,self.idx_selected,...]
+#         out = self.block_3(out)
+#         identity = identity[:,self.idx_selected,...]
         
-        out += identity
-        # out = self.relu(out)
+#         out += identity
+#         # out = self.relu(out)
                 
-        return out
+#         return out
     
-class OwnBasicblock_wo_ReLu(torch.nn.Module):
-    def __init__(self, block_1, block_2, idx_selected, input_size):
-        '''
-        just pass OderedDicts, bottleneck like layer is created. For ResNet with Basicblocks. 
-        '''
-        super().__init__()
-        self.block_1 = torch.nn.Sequential(block_1)
-        self.block_2 = torch.nn.Sequential(block_2)
-        # self.relu = torch.nn.ReLU(inplace=True)
-        self.idx_selected = idx_selected
-        channels_not_selected = [i for i in range(input_size[1]) if i not in self.idx_selected]
-        DG = tp.DependencyGraph().build_dependency(self.block_2, example_inputs=torch.rand(input_size))
-        group = DG.get_pruning_group(self.block_2.final_3, tp.prune_conv_out_channels, idxs=channels_not_selected)
-        print(group)
-        if DG.check_pruning_group(group): # avoid full pruning, i.e., channels=0.  
-            group.prune()
+# class OwnBasicblock_wo_ReLu(torch.nn.Module):
+#     def __init__(self, block_1, block_2, idx_selected, input_size):
+#         '''
+#         just pass OderedDicts, bottleneck like layer is created. For ResNet with Basicblocks. 
+#         '''
+#         super().__init__()
+#         self.block_1 = torch.nn.Sequential(block_1)
+#         self.block_2 = torch.nn.Sequential(block_2)
+#         # self.relu = torch.nn.ReLU(inplace=True)
+#         self.idx_selected = idx_selected
+#         channels_not_selected = [i for i in range(input_size[1]) if i not in self.idx_selected]
+#         DG = tp.DependencyGraph().build_dependency(self.block_2, example_inputs=torch.rand(input_size))
+#         group = DG.get_pruning_group(self.block_2.final_3, tp.prune_conv_out_channels, idxs=channels_not_selected)
+#         print(group)
+#         if DG.check_pruning_group(group): # avoid full pruning, i.e., channels=0.  
+#             group.prune()
         
-    def forward(self, x):
-        identity = x
-        out = self.block_1(x)
-        out = self.block_2(out)
-        identity = identity[:,self.idx_selected,...]
-        out += identity
-        # out = self.relu(out)
-        return out
+#     def forward(self, x):
+#         identity = x
+#         out = self.block_1(x)
+#         out = self.block_2(out)
+#         identity = identity[:,self.idx_selected,...]
+#         out += identity
+#         # out = self.relu(out)
+#         return out
