@@ -98,17 +98,22 @@ if __name__ == '__main__':
     model.layer_cut = True
     model.faiss_standard = True
     model.own_knn = False
-    
+    model.n_neighbors = 20 # since this increases accuracy by a lot, we use a different value here
+        
     run_counter = 0
     total_runs = 4*3*15*4
     reduction_factors = [25,50,75,100]
     for model_type in ['RN18', 'RN34','WRN50']:
-        for layers_needed in [[1], [2], [3], [4], [1,2], [1,3], [1,4], [2,3], [2,4], [3,4], [1,2,3], [1,2,4], [1,3,4], [2,3,4], [1,2,3,4]]:
+        for layers_needed in [[2], [3], [4], [1,2], [1,3], [1,4], [2,3], [2,4], [3,4], [1,2,3], [1,2,4], [1,3,4], [2,3,4], [1,2,3,4], [1]]:
             np.save(os.path.join(res_path, f'{this_run_id}_failed_runs.npy'), failed_runs)
             model.exclude_relu = False
             model.reduce_via_entropy = True
             model.model_id = model_type
             model.layers_needed = layers_needed
+            if model.layers_needed == [1] or len(model.layers_needed) > 1:
+                model.pooling_strategy = 'first_trial'
+            else:
+                model.pooling_strategy = 'default'
             for factor in reduction_factors:
                 model.reduction_factor = factor
                 layers_str = '_'.join(str(x) for x in layers_needed)
@@ -125,8 +130,13 @@ if __name__ == '__main__':
             model.exclude_relu = False
             model.reduce_via_entropy = False
             model.reduce_via_entropy_normed = True
+            model.reduce_via_std = False
             model.model_id = model_type
             model.layers_needed = layers_needed
+            if model.layers_needed == [1] or len(model.layers_needed) > 1:
+                model.pooling_strategy = 'first_trial'
+            else:
+                model.pooling_strategy = 'default'
             for factor in reduction_factors:
                 model.reduction_factor = factor
                 layers_str = '_'.join(str(x) for x in layers_needed)
@@ -146,6 +156,10 @@ if __name__ == '__main__':
             model.reduce_via_std = True
             model.model_id = model_type
             model.layers_needed = layers_needed
+            if model.layers_needed == [1] or len(model.layers_needed) > 1:
+                model.pooling_strategy = 'first_trial'
+            else:
+                model.pooling_strategy = 'default'
             for factor in reduction_factors:
                 model.reduction_factor = factor
                 layers_str = '_'.join(str(x) for x in layers_needed)
@@ -181,8 +195,14 @@ if __name__ == '__main__':
             model.exclude_relu = False
             model.reduce_via_entropy = False
             model.reduce_via_entropy_normed = True
+            model.reduce_via_std = False
             model.model_id = model_type
             model.layers_needed = layers_needed
+            if model.layers_needed == [1] or len(model.layers_needed) > 1:
+                model.pooling_strategy = 'first_trial'
+            else:
+                model.pooling_strategy = 'default'
+            model.sigmoid_in_last_layer = True
             for factor in reduction_factors:
                 model.reduction_factor = factor
                 layers_str = '_'.join(str(x) for x in layers_needed)

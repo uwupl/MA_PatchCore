@@ -8,6 +8,7 @@ import cv2
 import os
 import warnings
 import time
+import shutil
 
 def cvt2heatmap(gray):
     heatmap = cv2.applyColorMap(np.uint8(gray), cv2.COLORMAP_JET)
@@ -299,3 +300,21 @@ def extract_vals_for_plot(summary_df: pd.DataFrame):
     storage = summary_df.loc[:, 'backbone_storage'].values
     return labels, feature_extraction, embedding, search, calc_distances, own_auc, MVTechAD_auc, storage
 
+def remove_failed_run_dirs(failed_runs: np.ndarray):
+    '''
+    removes failed runs from run_dirs
+    '''
+    dir_path = os.path.dirname(os.path.abspath(__file__))
+    for folder in failed_runs:
+        path = os.path.join(dir_path,'results', folder)
+        if os.path.isdir(path):
+            shutil.rmtree(path)
+    return None
+
+def remove_all_empty_run_dirs():
+    dir_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'results')
+    for folder in os.listdir(dir_path):
+        if os.path.isdir(os.path.join(dir_path, folder)):
+            if len(os.listdir(os.path.join(dir_path, folder))) == 0:
+                shutil.rmtree(os.path.join(dir_path, folder))
+    return None
