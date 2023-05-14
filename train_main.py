@@ -76,6 +76,7 @@ class PatchCore(pl.LightningModule):
         self.layer_cut = True
         self.prune_output_layer = (False, [])
         self.exclude_relu = False
+        self.sigmoid_in_last_layer = False
         
         # self.model = Backbone(model_id=self.model_id, layers_needed=self.layers_needed, layer_cut=self.layer_cut, prune_output_layer=(False, []))
         # if self.quantization:
@@ -149,7 +150,7 @@ class PatchCore(pl.LightningModule):
         if not os.path.exists(self.log_path):
             os.makedirs(self.log_path)
         if self.cuda_active_training:
-            self.model = Backbone(model_id=self.model_id, layers_needed=self.layers_needed, layer_cut=self.layer_cut, prune_output_layer=(False, []), exclude_relu=self.exclude_relu).cuda()
+            self.model = Backbone(model_id=self.model_id, layers_needed=self.layers_needed, layer_cut=self.layer_cut, prune_output_layer=(False, []), exclude_relu=self.exclude_relu, sigmoid_in_last_layer = self.sigmoid_in_last_layer).cuda()
         else:
             self.model = Backbone(model_id=self.model_id, layers_needed=self.layers_needed, layer_cut=self.layer_cut, prune_output_layer=(False, []), exclude_relu=self.exclude_relu)
         
@@ -650,6 +651,7 @@ class PatchCore(pl.LightningModule):
                 'layers_needed': self.layers_needed,
                 'layer_cut': self.layer_cut,
                 'exclude_relu': self.exclude_relu,
+                'sigmoid_in_last_layer': self.sigmoid_in_last_layer,
                 'prune_output_layer': f'{self.prune_output_layer[0]} #{len(self.prune_output_layer[1])}',
                 'adapted_score_calc': self.adapted_score_calc,
                 'n_neighbors': self.n_neighbors,

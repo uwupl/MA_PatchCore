@@ -155,7 +155,7 @@ def get_summary_df(this_run_id: str, res_path: str, save_df = False):
         try:
             pd_summary = pd.read_csv(file_path, index_col=0)
             if pd_summary.shape[1] != int(16):
-                print(k)
+                # print(k)
                 print(file_path)
                 failed_runs.append(k)
                 correction_number += 1
@@ -226,8 +226,8 @@ def plot_results(labels, feature_extraction, embedding, search, calc_scores, own
     visualizes results in bar chart
     '''
     for k in range(len(labels)):
-        labels[k] = labels[k]
-        labels[k] = labels[k] + '\n' + str(round(storage[k],1))
+        # labels[k] = labels[k]
+        labels[k] = labels[k] + '\n' + str(round(storage[k],2)) + ' MB'
     
     x = np.arange(len(labels))  # the label locations
     width = width  # the width of the bars
