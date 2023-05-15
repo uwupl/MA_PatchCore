@@ -298,7 +298,9 @@ def extract_vals_for_plot(summary_df: pd.DataFrame):
     own_auc = summary_df.loc[:, 'img_auc_own'].values*100
     MVTechAD_auc = summary_df.loc[:, 'img_auc_MVTechAD'].values*100
     storage = summary_df.loc[:, 'backbone_storage'].values
-    return labels, feature_extraction, embedding, search, calc_distances, own_auc, MVTechAD_auc, storage
+    coreset_size = get_coreset_size_length_inner_process(summary_df)
+    
+    return labels, feature_extraction, embedding, search, calc_distances, own_auc, MVTechAD_auc, storage, coreset_size
 
 def remove_failed_run_dirs(failed_runs: np.ndarray):
     '''
@@ -321,3 +323,58 @@ def remove_all_empty_run_dirs():
                 shutil.rmtree(os.path.join(dir_path, folder))
     print(f'Removed {counter} empty folders')
     return None
+
+def get_coreset_size_length_inner_process(pd_summary):
+    '''
+    some string operations to get the number of features used (length), returns int
+    '''
+    try:
+        b = pd_summary.loc[:,'coreset_size'].values[0]
+        res = b[b.find(' ')+1:b.find(')')]
+    except:
+        res = 'NA'
+    return res
+
+def sort_by_attribute(attribute, labels, feature_extraction, embedding, search, calc_distances, own_auc, MVTechAD_auc, storage):
+    '''
+    returns a sorted dataframe by attribute.
+    Give as attribute a copy of one of the other arguments.
+    '''
+    order = np.argsort(attribute)
+    return labels[order], feature_extraction[order], embedding[order], search[order], calc_distances[order], own_auc[order], MVTechAD_auc[order], storage[order]
+
+def filter_by_contain_in_label_str(labels, feature_extraction, embedding, search, calc_distances, own_auc, MVTechAD_auc, storage ,to_contain: list, to_delete: list):
+    '''
+    returns a list of labels that contain to_contain and do not contain to_delete
+    '''
+    for pattern in to_contain:
+        mask_1 = [True if label.__contains__(pattern) else False for label in labels]
+        labels, feature_extraction, embedding, search, calc_distances, own_auc, MVTechAD_auc, storage = labels[mask_1], feature_extraction[mask_1], embedding[mask_1], search[mask_1], calc_distances[mask_1], own_auc[mask_1], MVTechAD_auc[mask_1], storage[mask_1]
+
+    for pattern in to_delete:
+        mask_2 = [True if not label.__contains__(pattern) else False for label in labels]
+        labels, feature_extraction, embedding, search, calc_distances, own_auc, MVTechAD_auc, storage = labels[mask_2], feature_extraction[mask_2], embedding[mask_2], search[mask_2], calc_distances[mask_2], own_auc[mask_2], MVTechAD_auc[mask_2], storage[mask_2]
+    return labels, feature_extraction, embedding, search, calc_distances, own_auc, MVTechAD_auc, storage
+
+def shorten_labels(labels, to_delete: list):
+    '''
+    returns a list of labels with shortened names
+    '''
+    for k in range(len(to_delete)):
+        labels = [label.replace(to_delete[k],'') for label in labels]
+    return labels
+def get_plot_ready_data(this_run_id, res_path, to_contain, to_delete):
+    '''
+    returns data, that is ready to be plotted. Specify filters by the to_contain and to_delete lists. optional.
+    '''
+    summary_pd = get_summary_df(this_run_id, res_path)
+    labels, feature_extraction, embedding, search, calc_distances, own_auc, MVTechAD_auc, storage, coreset_size = extract_vals_for_plot(summary_pd)
+    for k in range(len(coreset_size)):
+        labels[k] = labels[k] + '\n(' + str(coreset_size[k]) + ')'
+    labels, feature_extraction, embedding, search, calc_distances, own_auc, MVTechAD_auc, storage = sort_by_attribute(MVTechAD_auc, labels, feature_extraction, embedding, search, calc_distances, own_auc, MVTechAD_auc, storage)
+    print(len(labels))
+    labels, feature_extraction, embedding, search, calc_distances, own_auc, MVTechAD_auc, storage = filter_by_contain_in_label_str(labels, feature_extraction, embedding, search, calc_distances, own_auc, MVTechAD_auc, storage, to_contain=to_contain, to_delete=to_delete)
+    print(len(labels))
+
+    labels = shorten_labels(labels, to_delete=to_contain) # and mention in title of plot instead in order to keep somehow short labels
+    return labels, feature_extraction, embedding, search, calc_distances, own_auc, MVTechAD_auc, storage
