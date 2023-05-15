@@ -12,14 +12,14 @@ def adaptive_pooling(feature, pooling_strategy):
     
     elif pooling_strategy.__contains__('first_trial'):
         # everything to 7x7 with 224 input size
-        if spatial_dim == 56:  # TODO --> adapt depeding in input size of pic
+        if spatial_dim == 56: #layer 1 # TODO --> adapt depeding in input size of pic
             pool = torch.nn.AvgPool2d(kernel_size=8, stride=4, padding=4)
-        elif spatial_dim == 28:
+        elif spatial_dim == 28: #layer 2
             pool = torch.nn.AvgPool2d(kernel_size=4, stride=2, padding=2)
-        elif spatial_dim == 14:
+        elif spatial_dim == 14: #layer 3
             pool = torch.nn.AvgPool2d(kernel_size=2, stride=1, padding=1)
-        elif spatial_dim == 7:
-            pool = torch.nn.AvgPool2d(kernel_size=1, stride=1, padding=1)#
+        elif spatial_dim == 7: #layer 4
+            pool = torch.nn.AvgPool2d(kernel_size=1, stride=1, padding=0)#
     elif pooling_strategy.__contains__('second_trial'):
         if spatial_dim == 56:  # TODO --> adapt depeding in input size of pic
             pool = torch.nn.AvgPool2d(kernel_size=8, stride=4, padding=2)

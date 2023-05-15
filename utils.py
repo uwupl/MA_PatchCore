@@ -312,9 +312,12 @@ def remove_failed_run_dirs(failed_runs: np.ndarray):
     return None
 
 def remove_all_empty_run_dirs():
+    counter = 0
     dir_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'results')
     for folder in os.listdir(dir_path):
-        if os.path.isdir(os.path.join(dir_path, folder)):
-            if len(os.listdir(os.path.join(dir_path, folder))) == 0:
+        if os.path.isdir(os.path.join(dir_path, folder, 'csv')):
+            if len(os.listdir(os.path.join(dir_path, folder, 'csv'))) == 0:
+                counter += 1 
                 shutil.rmtree(os.path.join(dir_path, folder))
+    print(f'Removed {counter} empty folders')
     return None
