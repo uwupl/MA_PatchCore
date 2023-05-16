@@ -281,7 +281,7 @@ def plot_results(labels, feature_extraction, embedding, search, calc_scores, own
         file_name = str(int(time.time())) + title.replace(' ', '_') + '_' + '.svg'
         if not os.path.exists(res_path):
             os.makedirs(res_path) 
-        plt.savefig(os.path.join(res_path, file_name), bbox_inches = 'tight')
+        plt.savefig(os.path.join(res_path,'plots', file_name), bbox_inches = 'tight')
         
     if show:
         plt.show()
@@ -363,7 +363,7 @@ def shorten_labels(labels, to_delete: list):
     for k in range(len(to_delete)):
         labels = [label.replace(to_delete[k],'') for label in labels]
     return labels
-def get_plot_ready_data(this_run_id, res_path, to_contain, to_delete):
+def get_plot_ready_data(this_run_id, res_path, to_contain, to_delete, take_n_best = None): 
     '''
     returns data, that is ready to be plotted. Specify filters by the to_contain and to_delete lists. optional.
     '''
@@ -371,8 +371,12 @@ def get_plot_ready_data(this_run_id, res_path, to_contain, to_delete):
     labels, feature_extraction, embedding, search, calc_distances, own_auc, MVTechAD_auc, storage, coreset_size = extract_vals_for_plot(summary_pd)
     for k in range(len(coreset_size)):
         labels[k] = labels[k] + '\n(' + str(coreset_size[k]) + ')'
-    labels, feature_extraction, embedding, search, calc_distances, own_auc, MVTechAD_auc, storage = sort_by_attribute(MVTechAD_auc, labels, feature_extraction, embedding, search, calc_distances, own_auc, MVTechAD_auc, storage)
     print(len(labels))
+    # if attribute_to_sort_by is not None:
+    labels, feature_extraction, embedding, search, calc_distances, own_auc, MVTechAD_auc, storage = sort_by_attribute(MVTechAD_auc, labels, feature_extraction, embedding, search, calc_distances, own_auc, MVTechAD_auc, storage)
+    if take_n_best is not None:
+        labels, feature_extraction, embedding, search, calc_distances, own_auc, MVTechAD_auc, storage = labels[-take_n_best:], feature_extraction[-take_n_best:], embedding[-take_n_best:], search[-take_n_best:], calc_distances[-take_n_best:], own_auc[-take_n_best:], MVTechAD_auc[-take_n_best:], storage[-take_n_best:]
+    
     labels, feature_extraction, embedding, search, calc_distances, own_auc, MVTechAD_auc, storage = filter_by_contain_in_label_str(labels, feature_extraction, embedding, search, calc_distances, own_auc, MVTechAD_auc, storage, to_contain=to_contain, to_delete=to_delete)
     print(len(labels))
 
