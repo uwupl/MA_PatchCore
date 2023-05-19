@@ -382,3 +382,24 @@ def get_plot_ready_data(this_run_id, res_path, to_contain, to_delete, take_n_bes
 
     labels = shorten_labels(labels, to_delete=to_contain) # and mention in title of plot instead in order to keep somehow short labels
     return labels, feature_extraction, embedding, search, calc_distances, own_auc, MVTechAD_auc, storage
+
+def remove_test_dir():
+    if get_dir_size(os.path.join(os.getcwd(), 'test'))/(1024*1024*1024) > 5:
+        print('delete')
+        # os.remove(os.path.join(os.getcwd(), 'test', 'test.txt'))
+        try:
+            shutil.rmtree(os.path.join(os.getcwd(), 'test'))
+            print('deleted')
+        except:
+            print('could not delete')
+            
+            
+def get_dir_size(path='.'):
+    total = 0
+    with os.scandir(path) as it:
+        for entry in it:
+            if entry.is_file():
+                total += entry.stat().st_size
+            elif entry.is_dir():
+                total += get_dir_size(entry.path)
+    return total
