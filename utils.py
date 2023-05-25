@@ -314,6 +314,9 @@ def remove_failed_run_dirs(failed_runs: np.ndarray):
     return None
 
 def remove_all_empty_run_dirs():
+    '''
+    removes all empty run dirs
+    '''
     counter = 0
     dir_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'results')
     for folder in os.listdir(dir_path):
@@ -321,6 +324,33 @@ def remove_all_empty_run_dirs():
             if len(os.listdir(os.path.join(dir_path, folder, 'csv'))) == 0:
                 counter += 1 
                 shutil.rmtree(os.path.join(dir_path, folder))
+    print(f'Removed {counter} empty folders')
+    return None
+
+def remove_uncomplete_runs():
+    '''
+    checks if all csv files are complete and removes uncomplete runs
+    '''
+    counter = 0
+    dir_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'results')
+    for folder in os.listdir(dir_path):
+        if os.path.isdir(os.path.join(dir_path, folder, 'csv')):
+            if len(os.listdir(os.path.join(dir_path, folder, 'csv'))) == 0:
+                counter += 1 
+                shutil.rmtree(os.path.join(dir_path, folder))
+            else:
+                for file in os.listdir(os.path.join(dir_path, folder, 'csv')):
+                    if file.startswith('summary'):
+                        try:
+                            summary_df = pd.read_csv(os.path.join(dir_path, folder, 'csv', file), index_col=0)
+                        except:
+                            counter += 1 
+                            shutil.rmtree(os.path.join(dir_path, folder))
+                            break
+                        if summary_df.shape[1] != int(16):
+                            counter += 1 
+                            shutil.rmtree(os.path.join(dir_path, folder))
+                            break
     print(f'Removed {counter} empty folders')
     return None
 
@@ -363,6 +393,7 @@ def shorten_labels(labels, to_delete: list):
     for k in range(len(to_delete)):
         labels = [label.replace(to_delete[k],'') for label in labels]
     return labels
+
 def get_plot_ready_data(this_run_id, res_path, to_contain, to_delete, take_n_best = None): 
     '''
     returns data, that is ready to be plotted. Specify filters by the to_contain and to_delete lists. optional.
@@ -381,9 +412,14 @@ def get_plot_ready_data(this_run_id, res_path, to_contain, to_delete, take_n_bes
     print(len(labels))
 
     labels = shorten_labels(labels, to_delete=to_contain) # and mention in title of plot instead in order to keep somehow short labels
+    for k in range(len(labels)):
+        labels[k] = labels[k].replace('-','\n')
     return labels, feature_extraction, embedding, search, calc_distances, own_auc, MVTechAD_auc, storage
 
 def remove_test_dir():
+    '''
+    removes test dir if it is bigger than 5GB
+    '''
     if get_dir_size(os.path.join(os.getcwd(), 'test'))/(1024*1024*1024) > 5:
         print('delete')
         # os.remove(os.path.join(os.getcwd(), 'test', 'test.txt'))
@@ -391,10 +427,12 @@ def remove_test_dir():
             shutil.rmtree(os.path.join(os.getcwd(), 'test'))
             print('deleted')
         except:
-            print('could not delete')
-            
+            print('could not delete')  
             
 def get_dir_size(path='.'):
+    '''
+    returns size of directory in bytes
+    '''
     total = 0
     with os.scandir(path) as it:
         for entry in it:

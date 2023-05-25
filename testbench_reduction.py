@@ -5,8 +5,7 @@ import pytorch_lightning as pl
 import os
 import torch
 import gc
-
-from utils import get_summary_df
+import time
 
 def get_args():
     import argparse
@@ -30,6 +29,7 @@ def run(model, only_accuracy=False):
     '''
     Tests given config for all categories and measures inference time for own dataset.
     '''
+    st = time.perf_counter()
     cats = ['own','carpet','bottle', 'cable', 'capsule', 'grid', 'hazelnut', 'leather', 'metal_nut', 'pill', 'screw', 'tile', 'toothbrush', 'transistor', 'wood', 'zipper']
     for cat in cats:
         model.category = cat
@@ -55,12 +55,45 @@ def run(model, only_accuracy=False):
         if torch.cuda.is_available():
             gc.collect()
             torch.cuda.empty_cache()
+    et = time.perf_counter()
+    print('Total time: ', round(et-st, 2), 's')
+            
+def get_default_PatchCoreModel():
+    '''
+    Returns a PatchCore model with default settings.
+    '''
+    args = get_args()
+    model = PatchCore(args=args)
+    model.model_id = 'WRN50'
+    model.layers_needed = [2,3]
+    model.pooling_strategy = 'default' # nn.AvgPool2d(kernel_size=3, stride=1, padding=1)
+    model.exclude_relu = False # relu won't be used for final layer, in order to not lose negative values
+    model.sigmoid_in_last_layer = False # sigmoid will be used for final layer
+    model.normalize = False # performs normalization on the feature vector; mean = 0, std = 1
+    # backbone reduction
+    model.layer_cut = False
+    model.prune_output_layer = (False, [])
+    # nearest neighbor search
+    model.coreset_sampling_ratio = 0.01 #1%
+    model.faiss_quantized = False
+    model.faiss_standard = False
+    model.own_knn = True
+    # score calculation
+    model.adapted_score_calc = False
+    model.n_neighbors = 9
+    model.n_next_patches = 5 # only for adapted_score_calc
+    # channel reduction
+    model.reduce_via_std = False
+    model.reduce_via_entropy = False
+    model.reduce_via_entropy_normed = False
+    model.reduction_factor = 50 # only for reduce_via_std or reduce_via_entropy or reduce_via_entropy_normed
+    return model
             
 if __name__ == '__main__':
     
     ############ DO NOT CHANGE ############
     # INITIALIZATION
-    this_run_id = input('Please enter a run id: ')
+    this_run_id = '1505_'#input('Please enter a run id: ')
     args = get_args()
     model = PatchCore(args=args)
     model.group_id = this_run_id + '_default_Patchcore'
