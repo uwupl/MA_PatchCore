@@ -3,11 +3,14 @@ import numba as nb
 import pandas as pd
 import matplotlib as mpl
 import matplotlib.pyplot as plt
+# from train_main import PatchCore
+# import pytorch_lightning as pl
 import torch
 import cv2
 import os
 import warnings
 import time
+# import gc
 import shutil
 
 def cvt2heatmap(gray):
@@ -67,7 +70,8 @@ def modified_kNN_score_calc(score_patches, n_next_patches = 5):
         score_patches = score_patches[non_outlier_patches]
         print('deleted outliers: ', sum_of_each_patch.shape[0]-len(non_outlier_patches))
     k = score_patches.shape[1]
-    weights = np.array([(k-i)**2 for i in range(k)])#np.divide(np.array([(k-i)**2 for i in range(k)]), 1, dtype=np.float64) # Summe(i²) = (k*(k+1)*(2*k+1))/6
+    # weights = np.array([(k-i)**2 for i in range(k)])#np.divide(np.array([(k-i)**2 for i in range(k)]), 1, dtype=np.float64) # Summe(i²) = (k*(k+1)*(2*k+1))/6
+    weights = np.ones(k)    
     dists = np.sum(np.multiply(score_patches, weights), axis=1, dtype=np.float64)
     sorted_args = np.argsort(dists)
     score = np.zeros(n_next_patches)

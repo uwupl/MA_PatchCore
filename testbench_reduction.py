@@ -25,39 +25,56 @@ def get_args():
     args = parser.parse_args()
     return args
 
-def run(model, only_accuracy=False):
-    '''
-    Tests given config for all categories and measures inference time for own dataset.
-    '''
-    st = time.perf_counter()
-    cats = ['own','carpet','bottle', 'cable', 'capsule', 'grid', 'hazelnut', 'leather', 'metal_nut', 'pill', 'screw', 'tile', 'toothbrush', 'transistor', 'wood', 'zipper']
-    for cat in cats:
-        model.category = cat
-        print('\n\n', cat, '\n\n')
-        if cat == 'own' and not only_accuracy:
-            model.measure_inference = True
-            model.cuda_active_training = True
-            model.cuda_active = True
-            trainer = pl.Trainer.from_argparse_args(args, default_root_dir=os.path.join(args.project_root_path, args.category), max_epochs=args.num_epochs, accelerator='gpu', devices=1, precision = '32') # allow gpu for training    
-            trainer.fit(model)
-            model.cuda_active = False
-            trainer = pl.Trainer.from_argparse_args(args, default_root_dir=os.path.join(args.project_root_path, args.category), max_epochs=args.num_epochs, accelerator='cpu', devices=1, precision='32') # but not for testing
-            trainer.test(model)    
-        else:
-            model.measure_inference = False
-            model.cuda_active_training = True
-            model.cuda_active = True
-            model.num_workers = 12
-            trainer = pl.Trainer.from_argparse_args(args, default_root_dir=os.path.join(args.project_root_path, args.category), max_epochs=args.num_epochs, accelerator='gpu', devices=1, precision = '32') # allow gpu for training    
-            trainer.fit(model)
-            trainer = pl.Trainer.from_argparse_args(args, default_root_dir=os.path.join(args.project_root_path, args.category), max_epochs=args.num_epochs, accelerator='gpu', devices=1, precision='32') # but not for testing
-            trainer.test(model)    
-        if torch.cuda.is_available():
-            gc.collect()
-            torch.cuda.empty_cache()
-    et = time.perf_counter()
-    print('Total time: ', round(et-st, 2), 's')
-            
+class TestContainer():
+    def __init__(self) -> None:
+        self.run_no = 0
+        self.this_run_id = ''
+        self.failed_runs = np.array(['None'], dtype=str)
+        self.failed_runs_no = 0
+        self.total_runs = 100 #TODO
+        self.res_path = r'/mnt/crucial/UNI/IIIT_Muen/MA/code/productive/MA_PatchCore/results/'
+        
+    def run(self, model, only_accuracy=False):#, res_path = r'/mnt/crucial/UNI/IIIT_Muen/MA/code/productive/MA_PatchCore/results/'):
+        '''
+        Tests given config for all categories and measures inference time for own dataset.
+        '''
+        if not os.path.exists(os.path.join(res_path, model.group_id)):
+            try:
+                print('Run ', run_counter+1, ' of ', total_runs, ' started.')
+                st = time.perf_counter()
+                cats = ['own','carpet','bottle', 'cable', 'capsule', 'grid', 'hazelnut', 'leather', 'metal_nut', 'pill', 'screw', 'tile', 'toothbrush', 'transistor', 'wood', 'zipper']
+                for cat in cats:
+                    model.category = cat
+                    print('\n\n', cat, '\n\n')
+                    if cat == 'own' and not only_accuracy:
+                        model.measure_inference = True
+                        model.cuda_active_training = True
+                        model.cuda_active = True
+                        trainer = pl.Trainer.from_argparse_args(args, default_root_dir=os.path.join(args.project_root_path, args.category), max_epochs=args.num_epochs, accelerator='gpu', devices=1, precision = '32') # allow gpu for training    
+                        trainer.fit(model)
+                        model.cuda_active = False
+                        trainer = pl.Trainer.from_argparse_args(args, default_root_dir=os.path.join(args.project_root_path, args.category), max_epochs=args.num_epochs, accelerator='cpu', devices=1, precision='32') # but not for testing
+                        trainer.test(model)    
+                    else:
+                        model.measure_inference = False
+                        model.cuda_active_training = True
+                        model.cuda_active = True
+                        model.num_workers = 12
+                        trainer = pl.Trainer.from_argparse_args(args, default_root_dir=os.path.join(args.project_root_path, args.category), max_epochs=args.num_epochs, accelerator='gpu', devices=1, precision = '32') # allow gpu for training    
+                        trainer.fit(model)
+                        trainer = pl.Trainer.from_argparse_args(args, default_root_dir=os.path.join(args.project_root_path, args.category), max_epochs=args.num_epochs, accelerator='gpu', devices=1, precision='32') # but not for testing
+                        trainer.test(model)    
+                    if torch.cuda.is_available():
+                        gc.collect()
+                        torch.cuda.empty_cache()
+                et = time.perf_counter()
+                print('SUCCESS\nTotal time: ', round(et-st, 2), 's')
+            except:
+                self.failed_runs = np.append(self.failed_runs, model.group_id)
+                self.failed_runs_no += 1
+                np.save(os.path.join(self.res_path, f'{this_run_id}_failed_runs.npy'), self.failed_runs)
+                print('FAILED: ', model.group_id)
+
 def get_default_PatchCoreModel():
     '''
     Returns a PatchCore model with default settings.

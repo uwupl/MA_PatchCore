@@ -39,6 +39,10 @@ class Backbone(nn.Module):
             weights = models.ResNet34_Weights.DEFAULT
             self.model = models.resnet34(weights=weights)
             self.procedure_resnet()
+        elif self.model_id.__contains__('RN50'):
+            weights = models.ResNet50_Weights.DEFAULT
+            self.model = models.resnet50(weights=weights)
+            self.procedure_resnet()
             
         elif self.model_id.__contains__('CX_XS'):
             weights = models.ConvNeXt_Tiny_Weights

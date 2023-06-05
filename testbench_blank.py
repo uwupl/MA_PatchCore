@@ -1,9 +1,11 @@
 import numpy as np
 # import numba as nb
-from train_main import PatchCore#, get_args
+from train_main import PatchCore
 import pytorch_lightning as pl
 import os
 import torch
+import sys
+import traceback
 import gc
 import time
 
@@ -25,39 +27,76 @@ def get_args():
     args = parser.parse_args()
     return args
 
-def run(model, only_accuracy=False):
+class TestContainer():
     '''
-    Tests given config for all categories and measures inference time for own dataset.
+    Class which handles a test run.
     '''
-    st = time.perf_counter()
-    cats = ['own','carpet','bottle', 'cable', 'capsule', 'grid', 'hazelnut', 'leather', 'metal_nut', 'pill', 'screw', 'tile', 'toothbrush', 'transistor', 'wood', 'zipper']
-    for cat in cats:
-        model.category = cat
-        print('\n\n', cat, '\n\n')
-        if cat == 'own' and not only_accuracy:
-            model.measure_inference = True
-            model.cuda_active_training = True
-            model.cuda_active = True
-            trainer = pl.Trainer.from_argparse_args(args, default_root_dir=os.path.join(args.project_root_path, args.category), max_epochs=args.num_epochs, accelerator='gpu', devices=1, precision = '32') # allow gpu for training    
-            trainer.fit(model)
-            model.cuda_active = False
-            trainer = pl.Trainer.from_argparse_args(args, default_root_dir=os.path.join(args.project_root_path, args.category), max_epochs=args.num_epochs, accelerator='cpu', devices=1, precision='32') # but not for testing
-            trainer.test(model)    
+    def __init__(self) -> None:
+        self.run_no = 0
+        self.this_run_id = ''
+        self.failed_runs = np.array(['None'], dtype=str)
+        self.failed_runs_no = 0
+        self.dir_exists = 0
+        self.successful_runs = 0
+        self.total_runs = 100 #TODO
+        self.res_path = r'/mnt/crucial/UNI/IIIT_Muen/MA/code/productive/MA_PatchCore/results/'
+        self.run_times = np.array([])
+        
+    def run(self, model, only_accuracy=False):#, res_path = r'/mnt/crucial/UNI/IIIT_Muen/MA/code/productive/MA_PatchCore/results/'):
+        '''
+        Tests given config for all categories and measures inference time for own dataset.
+        '''
+        if not os.path.exists(os.path.join(self.res_path, model.group_id)):
+            try:
+                print('Run ', self.run_no+1, ' of ', self.total_runs, ' started.')
+                st = time.perf_counter()
+                cats = ['own','carpet','bottle', 'cable', 'capsule', 'grid', 'hazelnut', 'leather', 'metal_nut', 'pill', 'screw', 'tile', 'toothbrush', 'transistor', 'wood', 'zipper']
+                for cat in cats:
+                    model.category = cat
+                    print('\n\n', cat, '\n\n')
+                    if cat == 'own' and not only_accuracy:
+                        model.measure_inference = True
+                        model.cuda_active_training = True
+                        model.cuda_active = True
+                        trainer = pl.Trainer.from_argparse_args(args, default_root_dir=os.path.join(args.project_root_path, args.category), max_epochs=args.num_epochs, accelerator='gpu', devices=1, precision = '32') # allow gpu for training    
+                        trainer.fit(model)
+                        model.cuda_active = False
+                        trainer = pl.Trainer.from_argparse_args(args, default_root_dir=os.path.join(args.project_root_path, args.category), max_epochs=args.num_epochs, accelerator='cpu', devices=1, precision='32') # but not for testing
+                        trainer.test(model)    
+                    else:
+                        model.measure_inference = False
+                        model.cuda_active_training = True
+                        model.cuda_active = True
+                        model.num_workers = 12
+                        trainer = pl.Trainer.from_argparse_args(args, default_root_dir=os.path.join(args.project_root_path, args.category), max_epochs=args.num_epochs, accelerator='gpu', devices=1, precision = '32') # allow gpu for training    
+                        trainer.fit(model)
+                        trainer = pl.Trainer.from_argparse_args(args, default_root_dir=os.path.join(args.project_root_path, args.category), max_epochs=args.num_epochs, accelerator='gpu', devices=1, precision='32') # but not for testing
+                        trainer.test(model)    
+                    if torch.cuda.is_available():
+                        gc.collect()
+                        torch.cuda.empty_cache()
+                et = time.perf_counter()
+                print('SUCCESS\nTotal time: ', round(et-st, 2), 's')
+                self.successful_runs += 1
+                self.run_times = np.append(self.run_times, et-st)
+            except Exception:
+                ex_type, ex, tb = sys.exc_info()
+                traceback.print_tb(tb)
+                self.failed_runs = np.append(self.failed_runs, model.group_id)
+                self.failed_runs_no += 1
+                np.save(os.path.join(self.res_path, f'{self.this_run_id}_failed_runs.npy'), self.failed_runs)
+                print('FAILED: ', model.group_id)
         else:
-            model.measure_inference = False
-            model.cuda_active_training = True
-            model.cuda_active = True
-            model.num_workers = 12
-            trainer = pl.Trainer.from_argparse_args(args, default_root_dir=os.path.join(args.project_root_path, args.category), max_epochs=args.num_epochs, accelerator='gpu', devices=1, precision = '32') # allow gpu for training    
-            trainer.fit(model)
-            trainer = pl.Trainer.from_argparse_args(args, default_root_dir=os.path.join(args.project_root_path, args.category), max_epochs=args.num_epochs, accelerator='gpu', devices=1, precision='32') # but not for testing
-            trainer.test(model)    
-        if torch.cuda.is_available():
-            gc.collect()
-            torch.cuda.empty_cache()
-    et = time.perf_counter()
-    print('Total time: ', round(et-st, 2), 's')
-            
+            self.dir_exists += 1
+            print('Directory already exists: ', model.group_id)
+        self.run_no += 1
+
+    def get_summarization(self):
+        '''
+        Returns a summarization of the test run.
+        '''
+        return f'Run {self.this_run_id} finished.\n{self.successful_runs} of {self.total_runs} runs were successful.\n{self.failed_runs_no} runs failed.\n{self.dir_exists} directories already existed and were skipped.\nAverage time per run: {np.mean(self.run_times)}s.\nStandard deviation: {np.std(self.run_times)}s.\nMedian: {np.median(self.run_times)}s.\nTotal Time: {np.sum(self.run_times)}s.'#\nMaximum: {np.max(self.run_times)}s.'
+
 def get_default_PatchCoreModel():
     '''
     Returns a PatchCore model with default settings.
@@ -90,11 +129,34 @@ def get_default_PatchCoreModel():
     return model
             
 if __name__ == '__main__':
+    print('sleeep...')
+    # time.sleep(400 * 15)
+    print('awake!')
+    this_run_id = 'layer_comp_'
+    args = get_args()
+    model = get_default_PatchCoreModel()#args=args)
+    model.n_neighbors = 20
+    manager = TestContainer()
     
-    this_run_id = 'TO_BE_DEFINED'
-    model = get_default_PatchCoreModel()
-    model.group_id = this_run_id + '_default_Patchcore'
-
-    ###
-    # tweak model's arg here and impelement desired test loops
-    ###
+    manager.this_run_id = this_run_id
+    layers_needed = [1,2,3,4]
+    backbones = ['RN18', 'RN34', 'WRN50', 'RN50']
+    manager.total_runs = len(layers_needed) * 2 * len(backbones)
+    
+    for backbone in backbones:
+        model.model_id = backbone
+        # default avg 311
+        model.pooling_strategy = 'avg311'
+        for layer in layers_needed:
+            model.layers_needed = [layer]
+            model.group_id = f'{backbone}_default_{this_run_id}_layer{layer}'
+            manager.run(model)
+        
+        # output to 7x7 for all layers
+        model.pooling_strategy = 'first_trial'
+        for layer in layers_needed:
+            model.layers_needed = [layer]
+            model.group_id = f'{backbone}_7x7_{this_run_id}_layer{layer}'
+            manager.run(model)
+    
+          
