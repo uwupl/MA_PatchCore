@@ -43,7 +43,7 @@ class PatchCore(pl.LightningModule):
         self.n_next_patches = 5
         self.faiss_standard = False # temp
         self.faiss_quantized = False
-        self.faiss_quantized_
+        # self.faiss_quantized_
         self.own_knn = True
         self.adapted_score_calc = True
         self.specific_number_of_examples = int(0)

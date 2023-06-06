@@ -91,6 +91,55 @@ class TestContainer():
             print('Directory already exists: ', model.group_id)
         self.run_no += 1
 
+    def run_on_pi(self, model, only_accuracy=False):#, res_path = r'/mnt/crucial/UNI/IIIT_Muen/MA/code/productive/MA_PatchCore/results/'):
+        '''
+        Tests given config for all categories and measures inference time for own dataset.
+        '''
+        if not os.path.exists(os.path.join(self.res_path, model.group_id)):
+            try:
+                print('Run ', self.run_no+1, ' of ', self.total_runs, ' started.')
+                st = time.perf_counter()
+                cats = ['own','carpet','bottle', 'cable', 'capsule', 'grid', 'hazelnut', 'leather', 'metal_nut', 'pill', 'screw', 'tile', 'toothbrush', 'transistor', 'wood', 'zipper']
+                for cat in cats:
+                    model.category = cat
+                    print('\n\n', cat, '\n\n')
+                    if cat == 'own' and not only_accuracy:
+                        model.measure_inference = True
+                        model.cuda_active_training = False
+                        model.cuda_active = False
+                        trainer = pl.Trainer.from_argparse_args(args, default_root_dir=os.path.join(args.project_root_path, args.category), max_epochs=args.num_epochs, accelerator='cpu', devices=1, precision = '32') # allow gpu for training    
+                        trainer.fit(model)
+                        model.cuda_active = False
+                        trainer = pl.Trainer.from_argparse_args(args, default_root_dir=os.path.join(args.project_root_path, args.category), max_epochs=args.num_epochs, accelerator='cpu', devices=1, precision='32') # but not for testing
+                        trainer.test(model)    
+                    else:
+                        model.measure_inference = False
+                        model.cuda_active_training = False
+                        model.cuda_active = False
+                        model.num_workers = 4
+                        trainer = pl.Trainer.from_argparse_args(args, default_root_dir=os.path.join(args.project_root_path, args.category), max_epochs=args.num_epochs, accelerator='cpu', devices=1, precision = '32') # allow gpu for training    
+                        trainer.fit(model)
+                        trainer = pl.Trainer.from_argparse_args(args, default_root_dir=os.path.join(args.project_root_path, args.category), max_epochs=args.num_epochs, accelerator='cpu', devices=1, precision='32') # but not for testing
+                        trainer.test(model)    
+                    if torch.cuda.is_available():
+                        gc.collect()
+                        torch.cuda.empty_cache()
+                et = time.perf_counter()
+                print('SUCCESS\nTotal time: ', round(et-st, 2), 's')
+                self.successful_runs += 1
+                self.run_times = np.append(self.run_times, et-st)
+            except Exception:
+                ex_type, ex, tb = sys.exc_info()
+                traceback.print_tb(tb)
+                self.failed_runs = np.append(self.failed_runs, model.group_id)
+                self.failed_runs_no += 1
+                np.save(os.path.join(self.res_path, f'{self.this_run_id}_failed_runs.npy'), self.failed_runs)
+                print('FAILED: ', model.group_id)
+        else:
+            self.dir_exists += 1
+            print('Directory already exists: ', model.group_id)
+        self.run_no += 1
+    
     def get_summarization(self):
         '''
         Returns a summarization of the test run.
@@ -132,16 +181,16 @@ if __name__ == '__main__':
     print('sleeep...')
     # time.sleep(400 * 15)
     print('awake!')
-    this_run_id = 'layer_comp_0506'
+    this_run_id = 'first_try_pi'
     args = get_args()
     model = get_default_PatchCoreModel()#args=args)
     model.n_neighbors = 20
     manager = TestContainer()
     
     manager.this_run_id = this_run_id
-    layers_needed = [2,3,4]
-    backbones = ['RN18', 'RN34', 'WRN50', 'RN50']
-    manager.total_runs = len(layers_needed) * 2 * len(backbones)
+    layers_needed = [1]
+    backbones = ['RN18']#, 'RN34', 'WRN50', 'RN50']
+    manager.total_runs = 1#len(layers_needed) * 2 * len(backbones)
     model.layer_cut = True
     
     # for backbone in backbones:
@@ -167,10 +216,10 @@ if __name__ == '__main__':
     #         model.group_id = f'{this_run_id}-{backbone}-100 Samples_Avg311-layer {layer}'
     #         manager.run(model)
     
-    layers_needed = [2,3,4,1]
-    backbones = ['RN18', 'RN34', 'WRN50', 'RN50']
-    manager.total_runs = len(layers_needed) * 2 * len(backbones)
-    # model.layer_cut = True
+    # layers_needed = [2,3,4,1]
+    # backbones = ['RN18', 'RN34', 'WRN50', 'RN50']
+    # manager.total_runs = len(layers_needed) * 2 * len(backbones)
+    # # model.layer_cut = True
     
     for backbone in backbones:
         model.model_id = backbone
@@ -189,14 +238,14 @@ if __name__ == '__main__':
     #         manager.run(model)
     
         model.specific_number_of_examples = 100
-        model.pooling_strategy = 'avg311'
-        for layer in layers_needed:
-            model.layers_needed = [layer]
-            model.group_id = f'{this_run_id}-{backbone}-100 Samples_Avg311-layer {layer}'
-            manager.run(model)
+        # model.pooling_strategy = 'avg311'
+        # for layer in layers_needed:
+        #     model.layers_needed = [layer]
+        #     model.group_id = f'{this_run_id}-{backbone}-100 Samples_Avg311-layer {layer}'
+        #     manager.run(model)
         model.pooling_strategy = 'first_trial'
         for layer in layers_needed:
             model.layers_needed = [layer]
             model.group_id = f'{this_run_id}-{backbone}-100 Samples_7x7-layer {layer}'
-            manager.run(model)
+            manager.run_on_pi(model)
     print(manager.get_summarization())
