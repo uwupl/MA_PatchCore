@@ -122,7 +122,6 @@ def modified_kNN_score_calc_numba(score_patches, n_next_patches = 5, outlier_del
         score[p-1] =  w*dists[sorted_args[-p]]
     return np.mean(score)
 
-
 def prep_dirs(root, category):
     # make embeddings dir
     embeddings_path = os.path.join('./', 'embeddings', category)

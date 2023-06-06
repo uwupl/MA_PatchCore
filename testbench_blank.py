@@ -132,31 +132,71 @@ if __name__ == '__main__':
     print('sleeep...')
     # time.sleep(400 * 15)
     print('awake!')
-    this_run_id = 'layer_comp_'
+    this_run_id = 'layer_comp_0506'
     args = get_args()
     model = get_default_PatchCoreModel()#args=args)
     model.n_neighbors = 20
     manager = TestContainer()
     
     manager.this_run_id = this_run_id
-    layers_needed = [1,2,3,4]
+    layers_needed = [2,3,4]
     backbones = ['RN18', 'RN34', 'WRN50', 'RN50']
     manager.total_runs = len(layers_needed) * 2 * len(backbones)
+    model.layer_cut = True
+    
+    # for backbone in backbones:
+    #     model.model_id = backbone
+    #     # default avg 311
+    #     model.pooling_strategy = 'avg311'
+    #     for layer in layers_needed:
+    #         model.layers_needed = [layer]
+    #         model.group_id = f'{this_run_id}-{backbone}-default (Avg311)-layer {layer}'
+    #         manager.run(model)
+        
+    #     # output to 7x7 for all layers
+    #     model.pooling_strategy = 'first_trial'
+    #     for layer in layers_needed:
+    #         model.layers_needed = [layer]
+    #         model.group_id = f'{this_run_id}-{backbone}-7x7 output-layer {layer}'
+    #         manager.run(model)
+    
+    #     model.specific_number_of_examples = 100
+    #     model.pooling_strategy = 'avg311'
+    #     for layer in layers_needed:
+    #         model.layers_needed = [layer]
+    #         model.group_id = f'{this_run_id}-{backbone}-100 Samples_Avg311-layer {layer}'
+    #         manager.run(model)
+    
+    layers_needed = [2,3,4,1]
+    backbones = ['RN18', 'RN34', 'WRN50', 'RN50']
+    manager.total_runs = len(layers_needed) * 2 * len(backbones)
+    # model.layer_cut = True
     
     for backbone in backbones:
         model.model_id = backbone
-        # default avg 311
+    #     # default avg 311
+    #     model.pooling_strategy = 'avg311'
+    #     for layer in layers_needed:
+    #         model.layers_needed = [layer]
+    #         model.group_id = f'{this_run_id}-{backbone}-default (Avg311)-layer {layer}'
+    #         manager.run(model)
+        
+    #     # output to 7x7 for all layers
+    #     model.pooling_strategy = 'first_trial'
+    #     for layer in layers_needed:
+    #         model.layers_needed = [layer]
+    #         model.group_id = f'{this_run_id}-{backbone}-7x7 output-layer {layer}'
+    #         manager.run(model)
+    
+        model.specific_number_of_examples = 100
         model.pooling_strategy = 'avg311'
         for layer in layers_needed:
             model.layers_needed = [layer]
-            model.group_id = f'{backbone}_default_{this_run_id}_layer{layer}'
+            model.group_id = f'{this_run_id}-{backbone}-100 Samples_Avg311-layer {layer}'
             manager.run(model)
-        
-        # output to 7x7 for all layers
         model.pooling_strategy = 'first_trial'
         for layer in layers_needed:
             model.layers_needed = [layer]
-            model.group_id = f'{backbone}_7x7_{this_run_id}_layer{layer}'
+            model.group_id = f'{this_run_id}-{backbone}-100 Samples_7x7-layer {layer}'
             manager.run(model)
-    
-          
+    print(manager.get_summarization())

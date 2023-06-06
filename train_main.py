@@ -43,8 +43,10 @@ class PatchCore(pl.LightningModule):
         self.n_next_patches = 5
         self.faiss_standard = False # temp
         self.faiss_quantized = False
+        self.faiss_quantized_
         self.own_knn = True
         self.adapted_score_calc = True
+        self.specific_number_of_examples = int(0)
         self.normalize = False
         self.quantization = False
         self.measure_inference = False
@@ -254,10 +256,14 @@ class PatchCore(pl.LightningModule):
                 selected_idx = selector.select_batch(model=self.randomprojector, already_selected=[], N=int(total_embeddings.shape[0]*self.coreset_sampling_ratio))
             else:
                 # total_embeddings_copy = total_embeddings.astype(np.float32)
-                if self.cuda_active or self.cuda_active_training:
-                    sampler = k_center_greedy.KCenterGreedy(embedding=torch.from_numpy(total_embeddings).cuda(), sampling_ratio=float(self.coreset_sampling_ratio))
+                if self.specific_number_of_examples > 0:
+                    sampling_ratio = float(self.specific_number_of_examples/total_embeddings.shape[0])
                 else:
-                    sampler = k_center_greedy.KCenterGreedy(embedding=torch.from_numpy(total_embeddings), sampling_ratio=float(self.coreset_sampling_ratio))
+                    sampling_ratio = float(self.coreset_sampling_ratio)
+                if self.cuda_active or self.cuda_active_training:
+                    sampler = k_center_greedy.KCenterGreedy(embedding=torch.from_numpy(total_embeddings).cuda(), sampling_ratio=sampling_ratio)
+                else:
+                    sampler = k_center_greedy.KCenterGreedy(embedding=torch.from_numpy(total_embeddings), sampling_ratio=sampling_ratio)
                 selected_idx = sampler.select_coreset_idxs()
             
             self.embedding_coreset = total_embeddings[selected_idx]
