@@ -1,7 +1,7 @@
 import os
 from backbone import Backbone
 from datasets import MVTecDataset
-from utils import min_max_norm, heatmap_on_image, cvt2heatmap, distance_matrix, record_gpu, modified_kNN_score_calc, prep_dirs
+from utils import min_max_norm, heatmap_on_image, cvt2heatmap, distance_matrix, record_gpu, modified_kNN_score_calc, prep_dirs, softmax
 from pooling import adaptive_pooling
 from embedding import reshape_embedding, embedding_concat_frame
 from search import KNN, NN
@@ -68,6 +68,7 @@ class PatchCore(pl.LightningModule):
         self.reduce_via_std = False
         self.reduce_via_entropy = False
         self.reduce_via_entropy_normed = False
+        self.weight_by_entropy = False
         self.reduction_factor = 75
         self.pooling_strategy = ['default']#, 'max_1']#, 'first_trial']#, 'first_trial_max'] # 'first_trial'
 
@@ -211,7 +212,7 @@ class PatchCore(pl.LightningModule):
 
         if self.reduce_via_std:
             percentile_std = self.reduction_factor
-            self.idx_chosen = np.argwhere(np.std(total_embeddings, axis=0)<np.percentile(np.std(total_embeddings,axis=0), percentile_std))[:,0]
+            self.idx_chosen = np.argwhere(np.std(total_embeddings, axis=0)>np.percentile(np.std(total_embeddings,axis=0), percentile_std))[:,0]
             total_embeddings = np.take(total_embeddings, self.idx_chosen, axis=1)#total_embeddings[:,self.idx_with_high_std] # c contigous
         if self.normalize:
             self.mean = np.mean(total_embeddings, axis=0)
@@ -234,6 +235,14 @@ class PatchCore(pl.LightningModule):
             entropy = -np.sum(normed_embeddings*np.log2(normed_embeddings), axis=0)#.shape
             self.idx_chosen = np.argwhere(entropy>np.percentile(entropy, percentile_entropy))[:,0]
             total_embeddings = np.take(total_embeddings, self.idx_chosen, axis=1)
+        if self.weight_by_entropy:
+            total_embeddings_copy = total_embeddings.copy()
+            total_embeddings_copy[total_embeddings_copy<1e-15] = 1e-15
+            normed_embeddings = total_embeddings_copy/total_embeddings_copy.sum(axis=1, keepdims=1)
+            entropy = -np.sum(normed_embeddings*np.log2(normed_embeddings), axis=0)#.shape
+            # self.weights = softmax(entropy) * total_embeddings.shape[1]
+            self.weights = entropy / np.sum(entropy) * total_embeddings.shape[1]
+            total_embeddings = np.multiply(total_embeddings, self.weights)
         if (self.reduce_via_entropy or self.reduce_via_entropy_normed) and self.normalize and not self.reduce_via_std:
             self.std = np.take(self.std, self.idx_chosen)#, axis=0)
             self.mean = np.take(self.mean, self.idx_chosen)#, axis=0)
@@ -544,6 +553,9 @@ class PatchCore(pl.LightningModule):
         
         if self.normalize:
             flattened_features = (flattened_features - self.mean) / self.std
+        
+        if self.weight_by_entropy:
+            flattened_features = np.multiply(flattened_features, self.weights)
             
         return flattened_features
         
@@ -695,7 +707,7 @@ def get_args():
     import argparse
     parser = argparse.ArgumentParser(description='ANOMALYDETECTION')
     parser.add_argument('--phase', choices=['train','test'], default='train')
-    parser.add_argument('--dataset_path', default=r"C:\Users\uwupl\IIIT Muen\MA\productive\mvtec_anomaly_detection") #/mnt/crucial/UNI/IIIT_Muen/MA/MVTechAD
+    parser.add_argument('--dataset_path', default=r"/mnt/crucial/UNI/IIIT_Muen/MA/MVTechAD") #/mnt/crucial/UNI/IIIT_Muen/MA/MVTechAD
     parser.add_argument('--category', default='own', choices=['bottle', 'cable', 'capsule', 'carpet', 'grid', 'hazelnut', 'leather', 'metal_nut', 'pill', 'screw', 'tile', 'toothbrush', 'transistor', 'wood', 'zipper'])
     parser.add_argument('--num_epochs', default=1)
     parser.add_argument('--batch_size', default=32)
@@ -715,9 +727,9 @@ if __name__ == '__main__':
     
     model = PatchCore(args=args)
     if args.phase == 'train':
-        trainer = pl.Trainer.from_argparse_args(args, default_root_dir=os.path.join(args.project_root_path, args.category), max_epochs=args.num_epochs, accelerator='cpu', devices=1, precision = '32') # allow gpu for training    
+        trainer = pl.Trainer.from_argparse_args(args, default_root_dir=os.path.join(args.project_root_path, args.category), max_epochs=args.num_epochs, accelerator='gpu', devices=1, precision = '32') # allow gpu for training    
         trainer.fit(model)
-        trainer = pl.Trainer.from_argparse_args(args, default_root_dir=os.path.join(args.project_root_path, args.category), max_epochs=args.num_epochs, accelerator='cpu', devices=1, precision='32') # but not for testing
+        trainer = pl.Trainer.from_argparse_args(args, default_root_dir=os.path.join(args.project_root_path, args.category), max_epochs=args.num_epochs, accelerator='gpu', devices=1, precision='32') # but not for testing
         trainer.test(model)
     elif args.phase == 'test':
         trainer = pl.Trainer.from_argparse_args(args, default_root_dir=os.path.join(args.project_root_path, args.category), max_epochs=args.num_epochs, gpus=0)

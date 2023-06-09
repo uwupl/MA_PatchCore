@@ -12,9 +12,9 @@ def adaptive_pooling(feature, pooling_strategy):
         pool = torch.nn.AvgPool2d(3, 1, 1)
     elif pooling_strategy.__contains__('avg110'):
         pool = torch.nn.AvgPool2d(1, 1, 0)
-    elif pooling_strategy.__contains__('avg311'):
+    elif pooling_strategy.__contains__('avg311'): # 28x28 --> 28x28 --> mehr samples 1000*28*28  * 0.01 = (7840,128)
         pool = torch.nn.AvgPool2d(3, 1, 1)
-    elif pooling_strategy.__contains__('avg321'):
+    elif pooling_strategy.__contains__('avg321'): # 28x28 --> 14x14 --> weniger samples 1000*14*14  * 0.01 = (1960,128)
         pool = torch.nn.AvgPool2d(3, 2, 1)
     elif pooling_strategy.__contains__('avg331'):
         pool = torch.nn.AvgPool2d(3, 3, 1)

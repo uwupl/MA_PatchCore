@@ -180,6 +180,7 @@ def get_summary_df(this_run_id: str, res_path: str, save_df = False):
         calc_distances = np.max(np.float32(pd_summary.loc['calc_distances_[ms]'].values))
         calc_scores = np.max(np.float32(pd_summary.loc['calc_scores_[ms]'].values))
         total_time = np.max(np.float32(pd_summary.loc['total_time_[ms]'].values))
+        # coreset_size = np.max(np.float32(pd_summary.loc['coreset_size'].values))
         if (k - correction_number) == 0:
             # img_auc_total = img_auc
             img_auc_total_mean = img_auc_mean
@@ -301,7 +302,7 @@ def extract_vals_for_plot(summary_df: pd.DataFrame):
     own_auc = summary_df.loc[:, 'img_auc_own'].values*100
     MVTechAD_auc = summary_df.loc[:, 'img_auc_MVTechAD'].values*100
     storage = summary_df.loc[:, 'backbone_storage'].values
-    coreset_size = get_coreset_size_length_inner_process(summary_df)
+    coreset_size = get_coreset_size_length_inner_process(summary_df) 
     
     return labels, feature_extraction, embedding, search, calc_distances, own_auc, MVTechAD_auc, storage, coreset_size
 
@@ -361,11 +362,15 @@ def get_coreset_size_length_inner_process(pd_summary):
     '''
     some string operations to get the number of features used (length), returns int
     '''
-    try:
-        b = pd_summary.loc[:,'coreset_size'].values[0]
-        res = b[b.find(' ')+1:b.find(')')]
-    except:
-        res = 'NA'
+    result = []
+    for k in range(pd_summary.shape[0]):
+        try:
+            b = pd_summary.loc[:,'coreset_size'].values[0]
+            res = b[b.find(' ')+1:b.find(')')]
+        except:
+            res = 'NA'
+    
+    print(res)
     return res
 
 def sort_by_attribute(attribute, labels, feature_extraction, embedding, search, calc_distances, own_auc, MVTechAD_auc, storage):
@@ -405,14 +410,14 @@ def get_plot_ready_data(this_run_id, res_path, to_contain, to_delete, take_n_bes
     labels, feature_extraction, embedding, search, calc_distances, own_auc, MVTechAD_auc, storage, coreset_size = extract_vals_for_plot(summary_pd)
     for k in range(len(coreset_size)):
         labels[k] = labels[k] + '\n(' + str(coreset_size[k]) + ')'
-    print(len(labels))
+    print('Raw: #', len(labels))
     # if attribute_to_sort_by is not None:
     labels, feature_extraction, embedding, search, calc_distances, own_auc, MVTechAD_auc, storage = sort_by_attribute(MVTechAD_auc, labels, feature_extraction, embedding, search, calc_distances, own_auc, MVTechAD_auc, storage)
     if take_n_best is not None:
         labels, feature_extraction, embedding, search, calc_distances, own_auc, MVTechAD_auc, storage = labels[-take_n_best:], feature_extraction[-take_n_best:], embedding[-take_n_best:], search[-take_n_best:], calc_distances[-take_n_best:], own_auc[-take_n_best:], MVTechAD_auc[-take_n_best:], storage[-take_n_best:]
     
     labels, feature_extraction, embedding, search, calc_distances, own_auc, MVTechAD_auc, storage = filter_by_contain_in_label_str(labels, feature_extraction, embedding, search, calc_distances, own_auc, MVTechAD_auc, storage, to_contain=to_contain, to_delete=to_delete)
-    print(len(labels))
+    print('Filtered: #',len(labels))
 
     labels = shorten_labels(labels, to_delete=to_contain) # and mention in title of plot instead in order to keep somehow short labels
     for k in range(len(labels)):
@@ -444,3 +449,8 @@ def get_dir_size(path='.'):
             elif entry.is_dir():
                 total += get_dir_size(entry.path)
     return total
+
+def softmax(x):
+    """Compute softmax values for each sets of scores in x."""
+    e_x = np.exp(x - np.max(x))
+    return np.divide(e_x, np.sum(e_x)) 

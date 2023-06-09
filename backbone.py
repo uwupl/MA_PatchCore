@@ -1,4 +1,5 @@
 import torch
+import torch.nn.utils.prune as prune
 from torchvision import models
 import torch.nn as nn
 from typing import List, Tuple, OrderedDict
@@ -11,6 +12,7 @@ class Backbone(nn.Module):
         layers_needed: List[int],
         layer_cut: bool,
         prune_output_layer: Tuple[bool, List[int]] = (False, []),
+        prune_l1_norm: Tuple[bool, float] = (False, 0.0),
         exclude_relu: bool = False,
         sigmoid_in_last_layer: bool = False,
     ) -> None:
@@ -19,6 +21,7 @@ class Backbone(nn.Module):
         self.layers_needed = layers_needed
         self.layer_cut = layer_cut
         self.prune_output_layer = prune_output_layer
+        self.prune_l1_norm = prune_l1_norm
         self.exclude_relu = exclude_relu
         self.sigmoid_in_last_layer = sigmoid_in_last_layer
         self.init_features()
@@ -81,7 +84,7 @@ class Backbone(nn.Module):
 
     def hook_ResNet(self, module, input, output):
         '''
-        takes the model and prune it if desired. Mainly, hooks are placed here. For Nets with BasciBlock.
+        takes the model and prune it if desired. Mainly, hooks are placed here. For Nets with BasicBlock.
         '''
         if output.shape[1] == int(64):
             selected_idx = self.selected_idx_dict[1]
@@ -92,6 +95,9 @@ class Backbone(nn.Module):
         self.features.append(output[:,selected_idx,:,:])
 
     def procedure_resnet(self):
+        '''
+        processes the resnet model. This includes pruning, hooking and cutting the model.
+        '''
         if self.layer_cut and not self.prune_output_layer[0]:
             self.model = nn.Sequential(*(list(self.model.children())[0:int(4+max(self.layers_needed))]))
             if int(1) in self.layers_needed:
@@ -147,6 +153,11 @@ class Backbone(nn.Module):
                 output_layer = OwnBottleneck(dict_1, dict_2, dict_3, self.prune_output_layer[1], input_size, self.exclude_relu, self.sigmoid_in_last_layer)
             del self.model
             self.model = nn.Sequential(layers_1, layers_2, output_layer)
+
+            if self.prune_l1_norm[0]:
+                print('prune l1 norm')
+                self.model = prune_model_l1_unstrucured(self.model, pruning_perc=self.prune_l1_norm[1])
+                print('done')
             
             if len(self.layers_needed) > 1:
                 for layer in self.layers_needed[:-1]:
@@ -154,6 +165,7 @@ class Backbone(nn.Module):
             self.model[-1].register_forward_hook(self.hook_t)
         
         elif (self.prune_output_layer[0] or self.exclude_relu) and not self.model_id.__contains__('W'):
+            print('here I am')
             layer_to_include = max(self.layers_needed)
             selected_idx_list = self.prune_output_layer[1]
             if len(self.layers_needed) > 1:
@@ -186,6 +198,11 @@ class Backbone(nn.Module):
                 output_layer = OwnBasicblock(dict_1, dict_2, self.prune_output_layer[1], input_size, self.exclude_relu, self.sigmoid_in_last_layer)  
             del self.model
             self.model = nn.Sequential(layers_1, layers_2, output_layer)
+
+            if self.prune_l1_norm[0]:
+                print('prune l1 norm')
+                self.model = prune_model_l1_unstrucured(self.model, pruning_perc=self.prune_l1_norm[1])
+                print('done')
             
             if len(self.layers_needed) > 1:
                 for layer in self.layers_needed[:-1]:
@@ -219,8 +236,31 @@ class Backbone(nn.Module):
     def forward(self, x_t):
         self.init_features()
         _ = self.model(x_t)
-        return self.features  
+        return self.features
 
+def prune_model_l1_unstrucured(model, pruning_perc):
+    '''
+    Prune the model with the given pruning_perc. Decisions are made based on the L1 norm of the weights. 
+    '''
+    for name, module in model.named_modules():
+        if isinstance(module, nn.Conv2d):
+            prune.l1_unstructured(module, name='weight', amount=pruning_perc)
+            # prune.remove(module, 'weight')
+
+    return model
+
+
+    # def prune_model_l1_unstrucured(self, pruning_perc):
+    #     '''
+    #     Prune the model with the given pruning_perc. Decisions are made based on the L1 norm of the weights. 
+    #     '''
+    #     this_model = self.model#.copy()
+    #     del self.model
+    #     for name, module in this_model.named_modules():
+    #         if isinstance(module, nn.Conv2d):
+    #             prune.l1_unstructured(module, name='weight', amount=pruning_perc)
+    #             #prune.remove(module, 'weight')
+    #     self.model = this_model
 
 class OwnBottleneck(torch.nn.Module):
     def __init__(self, block_1, block_2, block_3, idx_selected, input_size, exclude_relu = False, sigmoid_in_last_layer=False):
@@ -279,7 +319,7 @@ class OwnBasicblock(torch.nn.Module):
         else:
             self.output_activation = torch.nn.ReLU(inplace=True)
         # self.output_activation = 
-        self.sigmoid = torch.nn.Sigmoid(inplace=True)
+        # self.sigmoid = torch.nn.Sigmoid(inplace=True)
         self.idx_selected = idx_selected
         if len(self.idx_selected) > 0:
             channels_not_selected = [i for i in range(input_size[1]) if i not in self.idx_selected]
