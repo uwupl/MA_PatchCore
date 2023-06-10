@@ -100,6 +100,10 @@ class Backbone(nn.Module):
         '''
         if self.layer_cut and not self.prune_output_layer[0]:
             self.model = nn.Sequential(*(list(self.model.children())[0:int(4+max(self.layers_needed))]))
+            if self.prune_l1_norm[0]:
+                print('prune l1 norm')
+                self.model = prune_model_l1_unstrucured(self.model, pruning_perc=self.prune_l1_norm[1])
+                print('done')
             if int(1) in self.layers_needed:
                 list(self.model.children())[4][-1].register_forward_hook(self.hook_t)
             if int(2) in self.layers_needed:
@@ -108,7 +112,12 @@ class Backbone(nn.Module):
                 list(self.model.children())[6][-1].register_forward_hook(self.hook_t)
             if int(4) in self.layers_needed:
                 list(self.model.children())[7][-1].register_forward_hook(self.hook_t)
+
         elif not self.layer_cut and not (self.prune_output_layer[0] or self.exclude_relu):
+            if self.prune_l1_norm[0]:
+                print('prune l1 norm')
+                self.model = prune_model_l1_unstrucured(self.model, pruning_perc=self.prune_l1_norm[1])
+                print('done')
             if int(1) in self.layers_needed:
                 self.model.layer1[-1].register_forward_hook(self.hook_t)
             if int(2) in self.layers_needed:
@@ -117,6 +126,7 @@ class Backbone(nn.Module):
                 self.model.layer3[-1].register_forward_hook(self.hook_t)
             if int(4) in self.layers_needed:
                 self.model.layer4[-1].register_forward_hook(self.hook_t)
+
         elif (self.prune_output_layer[0] or self.exclude_relu) and self.model_id.__contains__('W'):
             layer_to_include = max(self.layers_needed)
             selected_idx_list = self.prune_output_layer[1]
@@ -165,7 +175,7 @@ class Backbone(nn.Module):
             self.model[-1].register_forward_hook(self.hook_t)
         
         elif (self.prune_output_layer[0] or self.exclude_relu) and not self.model_id.__contains__('W'):
-            print('here I am')
+            # print('here I am')
             layer_to_include = max(self.layers_needed)
             selected_idx_list = self.prune_output_layer[1]
             if len(self.layers_needed) > 1:
