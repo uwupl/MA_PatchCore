@@ -133,7 +133,7 @@ class PatchCore(pl.LightningModule):
 
     def train_dataloader(self):
         image_datasets = MVTecDataset(root=os.path.join(self.dataset_path,self.category), transform=self.data_transforms, gt_transform=self.gt_transforms, phase='train', half=self.quantization)
-        train_loader = DataLoader(image_datasets, batch_size=self.batch_size, shuffle=True, num_workers=self.num_workers)
+        train_loader = DataLoader(image_datasets, batch_size=self.batch_size, shuffle=False, num_workers=self.num_workers)
         return train_loader
 
     def test_dataloader(self):
@@ -154,9 +154,9 @@ class PatchCore(pl.LightningModule):
         self.embedding_dir_path, self.sample_path, self.source_code_save_path = prep_dirs(self.logger.log_dir, self.category)
         # get backbone
         if self.cuda_active_training:
-            self.model = Backbone(model_id=self.model_id, layers_needed=self.layers_needed, layer_cut=self.layer_cut, prune_output_layer=(False, []), prune_l1_norm=self.prune_l1_norm, exclude_relu=self.exclude_relu, sigmoid_in_last_layer = self.sigmoid_in_last_layer).cuda()
+            self.model = Backbone(model_id=self.model_id, layers_needed=self.layers_needed, layer_cut=self.layer_cut, prune_output_layer=(False, []), exclude_relu=self.exclude_relu, sigmoid_in_last_layer = self.sigmoid_in_last_layer).cuda() #, prune_l1_norm=self.prune_l1_norm
         else:
-            self.model = Backbone(model_id=self.model_id, layers_needed=self.layers_needed, layer_cut=self.layer_cut, prune_output_layer=(False, []), prune_l1_norm=self.prune_l1_norm, exclude_relu=self.exclude_relu, sigmoid_in_last_layer = self.sigmoid_in_last_layer)
+            self.model = Backbone(model_id=self.model_id, layers_needed=self.layers_needed, layer_cut=self.layer_cut, prune_output_layer=(False, []), exclude_relu=self.exclude_relu, sigmoid_in_last_layer = self.sigmoid_in_last_layer) # prune_l1_norm=self.prune_l1_norm,
         print('Train model summary:')
         summary(self.model, (1, 3, 224, 224), depth = 2, device = 'cuda' if self.cuda_active else 'cpu')
         self.model.eval() # to stop running_var move (maybe not critical)        
@@ -171,13 +171,13 @@ class PatchCore(pl.LightningModule):
         if not os.path.exists(self.log_path):
             os.makedirs(self.log_path)
 
-        # get Backbone
-        if self.cuda_active:
-            self.model = Backbone(model_id=self.model_id, layers_needed=self.layers_needed, layer_cut=self.layer_cut, prune_output_layer=self.prune_output_layer, prune_l1_norm=self.prune_l1_norm, exclude_relu = self.exclude_relu, sigmoid_in_last_layer = self.sigmoid_in_last_layer).cuda()
-        else:
-            self.model = Backbone(model_id=self.model_id, layers_needed=self.layers_needed, layer_cut=self.layer_cut, prune_output_layer=self.prune_output_layer, prune_l1_norm=self.prune_l1_norm, exclude_relu = self.exclude_relu, sigmoid_in_last_layer = self.sigmoid_in_last_layer)
-        print('Test model summary:')
-        summary(model = self.model, input_size = (1, 3, 224, 224), depth = 2, device = 'cuda' if self.cuda_active else 'cpu')
+        # # get Backbone
+        # if self.cuda_active:
+        #     self.model = Backbone(model_id=self.model_id, layers_needed=self.layers_needed, layer_cut=self.layer_cut, prune_output_layer=self.prune_output_layer, exclude_relu = self.exclude_relu, sigmoid_in_last_layer = self.sigmoid_in_last_layer).cuda() # , prune_l1_norm=self.prune_l1_norm
+        # else:
+        #     self.model = Backbone(model_id=self.model_id, layers_needed=self.layers_needed, layer_cut=self.layer_cut, prune_output_layer=self.prune_output_layer, exclude_relu = self.exclude_relu, sigmoid_in_last_layer = self.sigmoid_in_last_layer) # , prune_l1_norm=self.prune_l1_norm
+        # print('Test model summary:')
+        # summary(model = self.model, input_size = (1, 3, 224, 224), depth = 2, device = 'cuda' if self.cuda_active else 'cpu')
         
         # load coreset and initialize knn search
         if self.faiss_standard or self.faiss_quantized:
@@ -269,7 +269,7 @@ class PatchCore(pl.LightningModule):
             file_name_embeddings = input('file name for embeddings:\n')
             np.save(file_name_embeddings + '.npy', total_embeddings)
         if (self.prune_output_layer[0] and (self.reduce_via_entropy or self.reduce_via_std or self.reduce_via_entropy_normed)):# or self.prune_l1_norm:
-            print('Pruning ...')        
+            # print('Pruning ...')        
             self.prune_output_layer = (True, self.idx_chosen)
             # self.model = Backbone(model_id=self.model_id, layers_needed=self.layers_needed, layer_cut=self.layer_cut, prune_output_layer=self.prune_output_layer, prune_l1_norm=self.prune_l1_norm, exclude_relu = self.exclude_relu, sigmoid_in_last_layer = self.sigmoid_in_last_layer)
         # Random projection
@@ -418,9 +418,8 @@ class PatchCore(pl.LightningModule):
                 pd_run_times.to_csv(file_path)
         
         else:
-            _, _, score_patches, score, anomaly_map = self.test_step_core(batch=batch, measure=False)
-                # calculating of scores and saving of results
-        
+            _, _, score_patches, score, anomaly_map = self.test_step_core(batch=batch, measure=False)                # calculating of scores and saving of results
+            print(score)
         if type(score_patches) == list:
             results = (score_patches, anomaly_map)
             x_batch, gt_batch, label_batch, file_name_batch, x_type_batch = batch
@@ -732,7 +731,7 @@ def get_args():
     parser.add_argument('--batch_size', default=32)
     parser.add_argument('--load_size', default=224)
     parser.add_argument('--input_size', default=224)
-    parser.add_argument('--coreset_sampling_ratio', default=0.01)
+    parser.add_argument('--coreset_sampling_ratio', default=1.0)
     parser.add_argument('--project_root_path', default=r'./test')
     parser.add_argument('--save_src_code', default=True)
     parser.add_argument('--save_anomaly_map', default=True)
@@ -742,16 +741,17 @@ def get_args():
 
 if __name__ == '__main__':
 
+    print('start')
+
     args = get_args()
     
     model = PatchCore(args=args)
-    # temp
     model.model_id = 'RN34'
-    model.layers_needed = [2]
     model.layer_cut = True
+    model.layers_needed = [2]
     model.cuda_active = True
-    model.cuda_active_training = True
-    model.prune_l1_norm = (True, 0.5)
+    
+    
     if args.phase == 'train':
         trainer = pl.Trainer.from_argparse_args(args, default_root_dir=os.path.join(args.project_root_path, args.category), max_epochs=args.num_epochs, accelerator='gpu', devices=1, precision = '32') # allow gpu for training    
         trainer.fit(model)
@@ -760,4 +760,24 @@ if __name__ == '__main__':
     elif args.phase == 'test':
         trainer = pl.Trainer.from_argparse_args(args, default_root_dir=os.path.join(args.project_root_path, args.category), max_epochs=args.num_epochs, gpus=0)
         trainer.test(model)
+
+    
+    # args = get_args()
+    
+    # model = PatchCore(args=args)
+    # # temp
+    # # model.model_id = 'RN34'
+    # # model.layers_needed = [2]
+    # # model.layer_cut = True
+    # # model.cuda_active = True
+    # # model.cuda_active_training = True
+    # # model.prune_l1_norm = (True, 0.5)
+    # if args.phase == 'train':
+    #     trainer = pl.Trainer.from_argparse_args(args, default_root_dir=os.path.join(args.project_root_path, args.category), max_epochs=args.num_epochs, accelerator='gpu', devices=1, precision = '32') # allow gpu for training    
+    #     trainer.fit(model)
+    #     trainer = pl.Trainer.from_argparse_args(args, default_root_dir=os.path.join(args.project_root_path, args.category), max_epochs=args.num_epochs, accelerator='gpu', devices=1, precision='32') # but not for testing
+    #     trainer.test(model)
+    # elif args.phase == 'test':
+    #     trainer = pl.Trainer.from_argparse_args(args, default_root_dir=os.path.join(args.project_root_path, args.category), max_epochs=args.num_epochs, gpus=0)
+    #     trainer.test(model)
 
