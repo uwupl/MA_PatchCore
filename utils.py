@@ -259,7 +259,7 @@ def plot_results(labels, feature_extraction, embedding, search, calc_scores, own
         ax.legend()
         ax_2.legend()
 
-        # ax.bar_label(rects1, padding=3)
+        ax.bar_label(rects1, padding=3)
         # ax.bar_label(rects2, padding=3)
         # ax.bar_label(rects3, padding=3)
         ax.bar_label(rects4, padding=3, fmt='%1.3f')
