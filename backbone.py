@@ -12,6 +12,7 @@ class Backbone(nn.Module):
         layers_needed: List[int],
         layer_cut: bool,
         prune_output_layer: Tuple[bool, List[int]] = (False, []),
+        prune_naive_structured: Tuple[bool, List[int]] = (False, 0.0),
         prune_l1_norm: Tuple[bool, float] = (False, 0.0),
         exclude_relu: bool = False,
         sigmoid_in_last_layer: bool = False,
@@ -21,7 +22,8 @@ class Backbone(nn.Module):
         self.layers_needed = layers_needed
         self.layer_cut = layer_cut
         self.prune_output_layer = prune_output_layer
-        self.prune_l1_unstructured = prune_l1_norm
+        self.prune_l1_unstructured = prune_l1_norm#
+        self.prune_naive_structured = prune_naive_structured
         self.exclude_relu = exclude_relu
         self.sigmoid_in_last_layer = sigmoid_in_last_layer
         self.init_features()
@@ -104,6 +106,32 @@ class Backbone(nn.Module):
                 print('prune l1 norm')
                 self.model = prune_model_l1_unstrucured(self.model, pruning_perc=self.prune_l1_unstructured[1])
                 print('done')
+            # if self.prune_naive_structured[0]:
+            
+            #     for param in self.parameters():
+            #         param.requires_grad = True
+            #     example_inputs = torch.rand((1,3,224,224))
+            #     imp = tp.importance.TaylorImportance()
+            #     ignored_layers = [m for m in self.modules()][-2:]
+            #     iterative_steps = 5 # progressive pruning
+            #     pruner = tp.pruner.MagnitudePruner(
+            #         self,
+            #         example_inputs,
+            #         importance=imp,
+            #         iterative_steps=iterative_steps,
+            #         ch_sparsity=self.prune_naive_structured[1], # remove 50% channels
+            #         ignored_layers=ignored_layers,
+            #     )
+            #     # print(self.model(example_inputs))
+            #     for i in range(iterative_steps):
+            #         if isinstance(imp, tp.importance.TaylorImportance):
+            #             # Taylor expansion requires gradients for importance estimation
+            #             loss = self.model(example_inputs)[0].sum() # a dummy loss for TaylorImportance
+            #             loss.backward() # before pruner.step()
+            #         pruner.step()
+            #     for param in self.parameters():
+            #         param.requires_grad = False
+                    
             if int(1) in self.layers_needed:
                 list(self.model.children())[4][-1].register_forward_hook(self.hook_t)
             if int(2) in self.layers_needed:
@@ -410,3 +438,42 @@ class OwnBasicblock(torch.nn.Module):
 #         out += identity
 #         # out = self.relu(out)
 #         return out
+
+def prune_naive(model, pruning_perc):
+    for param in model.parameters():
+        param.requires_grad = True
+
+    # summary(model, input_size=(1,3, 224, 224), verbose=1)
+    # Importance criteria
+    example_inputs = torch.randn(1, 3, 224, 224).cuda()
+    imp = tp.importance.TaylorImportance()
+
+    # ignored_layers = []
+    # for m in model.modules():
+    #     if isinstance(m, torch.nn.Linear) and m.out_features == 1000:
+    #         ignored_layers.append(m) # DO NOT prune the final classifier!
+    ignored_layers = [[m for m in model.modules()][-1]]
+
+    iterative_steps = 5 # progressive pruning
+    pruner = tp.pruner.MagnitudePruner(
+        model,
+        example_inputs,
+        importance=imp,
+        iterative_steps=iterative_steps,
+        ch_sparsity=pruning_perc, # remove 50% channels, ResNet18 = {64, 128, 256, 512} => ResNet18_Half = {32, 64, 128, 256}
+        ignored_layers=ignored_layers,
+    )
+    
+    # base_macs, base_nparams = tp.utils.count_ops_and_params(model, example_inputs)
+    for i in range(iterative_steps):
+        if isinstance(imp, tp.importance.TaylorImportance):
+            # Taylor expansion requires gradients for importance estimation
+            loss = model(example_inputs)[0].sum() # a dummy loss for TaylorImportance
+            loss.backward() # before pruner.step()
+        pruner.step()
+        # macs, nparams = tp.utils.count_ops_and_params(model, example_inputs)
+        # finetune your model here
+        # finetune(model)
+    for param in model.parameters():
+        param.requires_grad = False  
+    return model
