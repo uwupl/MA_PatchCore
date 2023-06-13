@@ -21,7 +21,7 @@ class Backbone(nn.Module):
         self.layers_needed = layers_needed
         self.layer_cut = layer_cut
         self.prune_output_layer = prune_output_layer
-        self.prune_l1_norm = prune_l1_norm
+        self.prune_l1_unstructured = prune_l1_norm
         self.exclude_relu = exclude_relu
         self.sigmoid_in_last_layer = sigmoid_in_last_layer
         self.init_features()
@@ -100,9 +100,9 @@ class Backbone(nn.Module):
         '''
         if self.layer_cut and not self.prune_output_layer[0]:
             self.model = nn.Sequential(*(list(self.model.children())[0:int(4+max(self.layers_needed))]))
-            if self.prune_l1_norm[0]:
+            if self.prune_l1_unstructured[0]:
                 print('prune l1 norm')
-                self.model = prune_model_l1_unstrucured(self.model, pruning_perc=self.prune_l1_norm[1])
+                self.model = prune_model_l1_unstrucured(self.model, pruning_perc=self.prune_l1_unstructured[1])
                 print('done')
             if int(1) in self.layers_needed:
                 list(self.model.children())[4][-1].register_forward_hook(self.hook_t)
@@ -114,9 +114,9 @@ class Backbone(nn.Module):
                 list(self.model.children())[7][-1].register_forward_hook(self.hook_t)
 
         elif not self.layer_cut and not (self.prune_output_layer[0] or self.exclude_relu):
-            if self.prune_l1_norm[0]:
+            if self.prune_l1_unstructured[0]:
                 print('prune l1 norm')
-                self.model = prune_model_l1_unstrucured(self.model, pruning_perc=self.prune_l1_norm[1])
+                self.model = prune_model_l1_unstrucured(self.model, pruning_perc=self.prune_l1_unstructured[1])
                 print('done')
             if int(1) in self.layers_needed:
                 self.model.layer1[-1].register_forward_hook(self.hook_t)
@@ -164,9 +164,9 @@ class Backbone(nn.Module):
             del self.model
             self.model = nn.Sequential(layers_1, layers_2, output_layer)
 
-            if self.prune_l1_norm[0]:
+            if self.prune_l1_unstructured[0]:
                 print('prune l1 norm')
-                self.model = prune_model_l1_unstrucured(self.model, pruning_perc=self.prune_l1_norm[1])
+                self.model = prune_model_l1_unstrucured(self.model, pruning_perc=self.prune_l1_unstructured[1])
                 print('done')
             
             if len(self.layers_needed) > 1:
@@ -209,9 +209,9 @@ class Backbone(nn.Module):
             del self.model
             self.model = nn.Sequential(layers_1, layers_2, output_layer)
 
-            if self.prune_l1_norm[0]:
+            if self.prune_l1_unstructured[0]:
                 print('prune l1 norm')
-                self.model = prune_model_l1_unstrucured(self.model, pruning_perc=self.prune_l1_norm[1])
+                self.model = prune_model_l1_unstrucured(self.model, pruning_perc=self.prune_l1_unstructured[1])
                 print('done')
             
             if len(self.layers_needed) > 1:
