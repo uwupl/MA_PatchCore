@@ -1,5 +1,5 @@
 import os
-from backbone import Backbone, prune_naive
+from backbone import Backbone, prune_naive, prune_model_l1_structured_nni
 from datasets import MVTecDataset
 from utils import min_max_norm, heatmap_on_image, cvt2heatmap, distance_matrix, record_gpu, modified_kNN_score_calc, prep_dirs, softmax
 from pooling import adaptive_pooling
@@ -79,6 +79,7 @@ class PatchCore(pl.LightningModule):
         self.prune_output_layer = (False, [])
         self.prune_l1_unstructured = (False, 0.0)
         self.prune_naive_structured = (False, 0.0)
+        self.prune_l1_structured_nni = (False, 0.0)
         self.exclude_relu = False
         self.sigmoid_in_last_layer = False
 
@@ -158,8 +159,13 @@ class PatchCore(pl.LightningModule):
             self.model = Backbone(model_id=self.model_id, layers_needed=self.layers_needed, layer_cut=self.layer_cut, prune_output_layer=(False, []), prune_naive_structured=self.prune_naive_structured, prune_l1_norm=self.prune_l1_unstructured, exclude_relu=self.exclude_relu, sigmoid_in_last_layer = self.sigmoid_in_last_layer).cuda() #, prune_l1_norm=self.prune_l1_unstructured
         else:
             self.model = Backbone(model_id=self.model_id, layers_needed=self.layers_needed, layer_cut=self.layer_cut, prune_output_layer=(False, []), prune_naive_structured=self.prune_naive_structured, prune_l1_norm=self.prune_l1_unstructured, exclude_relu=self.exclude_relu, sigmoid_in_last_layer = self.sigmoid_in_last_layer) # prune_l1_norm=self.prune_l1_unstructured,
+        
+        ### prune temp ###
         if self.prune_naive_structured[0]:
             self.model = prune_naive(self.model, self.prune_naive_structured[1])
+        if self.prune_l1_structured_nni[0]:
+            self.model = prune_model_l1_structured_nni(self.model, self.prune_l1_structured_nni[1])
+        ### prune temp ###
         
         print('Train model summary:')
         summary(self.model, (1, 3, 224, 224), depth = 2, device = 'cuda' if self.cuda_active else 'cpu')
@@ -757,9 +763,9 @@ if __name__ == '__main__':
     model.layers_needed = [2]
     model.cuda_active = True
     # model.prune_l1_unstructured = (True, 0.8)
-    model.prune_naive_structured = (True, 0.2)
+    # model.prune_naive_structured = (True, 0.2)
+    # model.prune_l1_structured_nni = (True, 0.2)
     model.sigmoid_in_last_layer = True
-    
     
     if args.phase == 'train':
         trainer = pl.Trainer.from_argparse_args(args, default_root_dir=os.path.join(args.project_root_path, args.category), max_epochs=args.num_epochs, accelerator='gpu', devices=1, precision = '32') # allow gpu for training    

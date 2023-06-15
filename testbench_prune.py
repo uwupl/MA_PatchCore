@@ -200,8 +200,8 @@ if __name__ == '__main__':
     # model.reduction_factor = 30
     
 
-    run_id_prefix = 'prune_1306_3-'
-    pruning_factors = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9]
+    run_id_prefix = 'prune_1506_nni-L2-'
+    pruning_factors = [0.4,0.1, 0.2, 0.3, 0.5, 0.6, 0.7, 0.8, 0.9]
 
     # for pf in pruning_factors:
     #     model.prune_l1_unstructured = (True, pf)
@@ -213,10 +213,10 @@ if __name__ == '__main__':
     # manager.get_summarization()
     
     for pf in pruning_factors:
-        model.prune_naive_structured = (True, pf)
+        model.prune_l1_structured_nni = (True, pf) # TODO
         model.group_id = run_id_prefix + 'pruned_by_' + str(pf)
         manager.run(model)
-    model.prune_naive_structured = (False, 0.0)    
+    model.prune_l1_structured_nni = (False, 0.0)    
     model.group_id = run_id_prefix + 'non_pruned'
     manager.run(model)
-    manager.get_summarization()
+    print(manager.get_summarization())

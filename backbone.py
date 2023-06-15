@@ -104,33 +104,34 @@ class Backbone(nn.Module):
             self.model = nn.Sequential(*(list(self.model.children())[0:int(4+max(self.layers_needed))]))
             if self.prune_l1_unstructured[0]:
                 print('prune l1 norm')
-                self.model = prune_model_l1_unstrucured(self.model, pruning_perc=self.prune_l1_unstructured[1])
+                self.model = prune_model_l1_strucured(self.model, pruning_perc=self.prune_l1_unstructured[1])
                 print('done')
-            # if self.prune_naive_structured[0]:
             
-            #     for param in self.parameters():
-            #         param.requires_grad = True
-            #     example_inputs = torch.rand((1,3,224,224))
-            #     imp = tp.importance.TaylorImportance()
-            #     ignored_layers = [m for m in self.modules()][-2:]
-            #     iterative_steps = 5 # progressive pruning
-            #     pruner = tp.pruner.MagnitudePruner(
-            #         self,
-            #         example_inputs,
-            #         importance=imp,
-            #         iterative_steps=iterative_steps,
-            #         ch_sparsity=self.prune_naive_structured[1], # remove 50% channels
-            #         ignored_layers=ignored_layers,
-            #     )
-            #     # print(self.model(example_inputs))
-            #     for i in range(iterative_steps):
-            #         if isinstance(imp, tp.importance.TaylorImportance):
-            #             # Taylor expansion requires gradients for importance estimation
-            #             loss = self.model(example_inputs)[0].sum() # a dummy loss for TaylorImportance
-            #             loss.backward() # before pruner.step()
-            #         pruner.step()
-            #     for param in self.parameters():
-            #         param.requires_grad = False
+            if self.prune_naive_structured[0]:
+            
+                for param in self.parameters():
+                    param.requires_grad = True
+                example_inputs = torch.rand((1,3,224,224))
+                imp = tp.importance.TaylorImportance()
+                ignored_layers = [m for m in self.modules()][-2:]
+                iterative_steps = 5 # progressive pruning
+                pruner = tp.pruner.MagnitudePruner(
+                    self,
+                    example_inputs,
+                    importance=imp,
+                    iterative_steps=iterative_steps,
+                    ch_sparsity=self.prune_naive_structured[1], 
+                    ignored_layers=ignored_layers,
+                )
+                # print(self.model(example_inputs))
+                for i in range(iterative_steps):
+                    if isinstance(imp, tp.importance.TaylorImportance):
+                        # Taylor expansion requires gradients for importance estimation
+                        loss = self.model(example_inputs)[0].sum() # a dummy loss for TaylorImportance
+                        loss.backward() # before pruner.step()
+                    pruner.step()
+                for param in self.parameters():
+                    param.requires_grad = False
                     
             if int(1) in self.layers_needed:
                 list(self.model.children())[4][-1].register_forward_hook(self.hook_t)
@@ -144,7 +145,7 @@ class Backbone(nn.Module):
         elif not self.layer_cut and not (self.prune_output_layer[0] or self.exclude_relu):
             if self.prune_l1_unstructured[0]:
                 print('prune l1 norm')
-                self.model = prune_model_l1_unstrucured(self.model, pruning_perc=self.prune_l1_unstructured[1])
+                self.model = prune_model_l1_strucured(self.model, pruning_perc=self.prune_l1_unstructured[1])
                 print('done')
             if int(1) in self.layers_needed:
                 self.model.layer1[-1].register_forward_hook(self.hook_t)
@@ -194,7 +195,7 @@ class Backbone(nn.Module):
 
             if self.prune_l1_unstructured[0]:
                 print('prune l1 norm')
-                self.model = prune_model_l1_unstrucured(self.model, pruning_perc=self.prune_l1_unstructured[1])
+                self.model = prune_model_l1_strucured(self.model, pruning_perc=self.prune_l1_unstructured[1])
                 print('done')
             
             if len(self.layers_needed) > 1:
@@ -239,7 +240,7 @@ class Backbone(nn.Module):
 
             if self.prune_l1_unstructured[0]:
                 print('prune l1 norm')
-                self.model = prune_model_l1_unstrucured(self.model, pruning_perc=self.prune_l1_unstructured[1])
+                self.model = prune_model_l1_strucured(self.model, pruning_perc=self.prune_l1_unstructured[1])
                 print('done')
             
             if len(self.layers_needed) > 1:
@@ -287,7 +288,91 @@ def prune_model_l1_unstrucured(model, pruning_perc):
 
     return model
 
+def prune_model_l1_strucured(model, pruning_perc):
+    '''
+    Prune the model with the given pruning_perc. Decisions are made based on the L1 norm of the weights. 
+    '''
+    for name, module in model.named_modules():
+        if isinstance(module, nn.Conv2d):
+            prune.ln_structured(module, name='weight', amount=pruning_perc, n=1, dim=1)
+            # prune.remove(module, 'weight')
 
+    return model
+
+
+def prune_model_l1_structured_nni(model, pruning_perc, print_logs=False):
+    '''
+    Prune the model with the given pruning_perc. Decisions are made based on the L1 norm of the weights. Utilizes the nni pruning pipeline by microsoft.
+    '''
+    from nni.compression.pytorch.pruning import FPGMPruner #,L1NormPruner #L2NormPruner,
+    
+    config_list = [{
+    'op_types': ['Conv2d'],
+    'total_sparsity': pruning_perc
+    }]
+    
+    # pruner = L1NormPruner(model, config_list)
+    pruner = FPGMPruner(model, config_list) #not working
+    # pruner = L2NormPruner(model, config_list)
+    
+    # compress the model and generate the masks
+    _, masks = pruner.compress()
+    # show the masks sparsity
+    if print_logs:
+        for name, mask in masks.items():
+            print(name, ' sparsity : ', '{:.2}'.format(mask['weight'].sum() / mask['weight'].numel()))
+        
+    # need to unwrap the model, if the model is wrapped before speedup
+    pruner._unwrap_model()
+
+    # speedup the model, for more information about speedup, please refer :doc:`pruning_speedup`.
+    from nni.compression.pytorch.speedup import ModelSpeedup
+
+    device = 'cuda' if next(model.parameters()).is_cuda else 'cpu'
+    
+    ModelSpeedup(model, torch.rand(1, 3, 224, 224).to(device), masks).speedup_model() # .to(device)
+    
+    for param in model.parameters():
+        param.requires_grad = False
+    
+    return model
+
+
+
+# def prune_model_l1_structured_nni(model, pruning_perc):
+#     '''
+#     Prune the model with the given pruning_perc. Decisions are made based on the L1 norm of the weights. Utilizes the nni pruning pipeline by microsoft.
+#     '''
+#     from nni.compression.pytorch.pruning import L1NormPruner
+    
+#     config_list = [{
+#     'op_types': ['Conv2d'],
+#     'total_sparsity': pruning_perc
+#     }]
+    
+#     pruner = L1NormPruner(model, config_list)
+    
+#     # compress the model and generate the masks
+#     _, masks = pruner.compress()
+#     # show the masks sparsity
+#     for name, mask in masks.items():
+#         print(name, ' sparsity : ', '{:.2}'.format(mask['weight'].sum() / mask['weight'].numel()))
+        
+#     # need to unwrap the model, if the model is wrapped before speedup
+#     pruner._unwrap_model()
+
+#     # speedup the model, for more information about speedup, please refer :doc:`pruning_speedup`.
+#     from nni.compression.pytorch.speedup import ModelSpeedup
+
+#     device = 'cuda' if next(model.parameters()).is_cuda else 'cpu'
+    
+#     ModelSpeedup(model, torch.rand(1, 3, 224, 224).to(device), masks).speedup_model() # .to(device)
+    
+#     for param in model.parameters():
+#         param.requires_grad = False
+    
+#     return model
+    
     # def prune_model_l1_unstrucured(self, pruning_perc):
     #     '''
     #     Prune the model with the given pruning_perc. Decisions are made based on the L1 norm of the weights. 
