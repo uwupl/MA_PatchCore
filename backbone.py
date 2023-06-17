@@ -300,11 +300,16 @@ def prune_model_l1_strucured(model, pruning_perc):
     return model
 
 
-def prune_model_l1_structured_nni(model, pruning_perc, print_logs=False):
+def prune_model_nni(model, pruning_perc, method = 'L1', print_logs=False):
     '''
     Prune the model with the given pruning_perc. Decisions are made based on the L1 norm of the weights. Utilizes the nni pruning pipeline by microsoft.
     '''
-    from nni.compression.pytorch.pruning import FPGMPruner #,L1NormPruner #L2NormPruner,
+    if method.__contains__('L1'):
+        from nni.compression.pytorch.pruning import L1NormPruner as Pruner #,L1NormPruner #L2NormPruner,
+    elif method.__contains__('L2'):
+        from nni.compression.pytorch.pruning import L2NormPruner as Pruner
+    elif method.__contains__('FPGM'):
+        from nni.compression.pytorch.pruning import FPGMPruner as Pruner
     
     config_list = [{
     'op_types': ['Conv2d'],
@@ -312,7 +317,7 @@ def prune_model_l1_structured_nni(model, pruning_perc, print_logs=False):
     }]
     
     # pruner = L1NormPruner(model, config_list)
-    pruner = FPGMPruner(model, config_list) #not working
+    pruner = Pruner(model, config_list) #not working
     # pruner = L2NormPruner(model, config_list)
     
     # compress the model and generate the masks

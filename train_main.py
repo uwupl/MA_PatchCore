@@ -1,5 +1,5 @@
 import os
-from backbone import Backbone, prune_naive, prune_model_l1_structured_nni
+from backbone import Backbone, prune_naive, prune_model_nni
 from datasets import MVTecDataset
 from utils import min_max_norm, heatmap_on_image, cvt2heatmap, distance_matrix, record_gpu, modified_kNN_score_calc, prep_dirs, softmax
 from pooling import adaptive_pooling
@@ -67,6 +67,9 @@ class PatchCore(pl.LightningModule):
         self.reduce_via_std = False
         self.reduce_via_entropy = False
         self.reduce_via_entropy_normed = False
+        self.pretrain_for_channel_selection = False
+        self.iterative_pruning = (False, 0)
+        # self.idx_chosen = np.array([], dtype=np.int32)
         self.weight_by_entropy = False
         self.reduction_factor = 75
         self.pooling_strategy = ['default']#, 'max_1']#, 'first_trial']#, 'first_trial_max'] # 'first_trial'
@@ -79,7 +82,7 @@ class PatchCore(pl.LightningModule):
         self.prune_output_layer = (False, [])
         self.prune_l1_unstructured = (False, 0.0)
         self.prune_naive_structured = (False, 0.0)
-        self.prune_l1_structured_nni = (False, 0.0)
+        self.prune_structured_nni = (False, 0.0, 'L1') # options: 'FPGM', 'L2'
         self.exclude_relu = False
         self.sigmoid_in_last_layer = False
 
@@ -156,16 +159,27 @@ class PatchCore(pl.LightningModule):
         self.embedding_dir_path, self.sample_path, self.source_code_save_path = prep_dirs(self.logger.log_dir, self.category)
         # get backbone
         if self.cuda_active_training:
-            self.model = Backbone(model_id=self.model_id, layers_needed=self.layers_needed, layer_cut=self.layer_cut, prune_output_layer=(False, []), prune_naive_structured=self.prune_naive_structured, prune_l1_norm=self.prune_l1_unstructured, exclude_relu=self.exclude_relu, sigmoid_in_last_layer = self.sigmoid_in_last_layer).cuda() #, prune_l1_norm=self.prune_l1_unstructured
+            self.model = Backbone(model_id=self.model_id, layers_needed=self.layers_needed, layer_cut=self.layer_cut, prune_output_layer=(False, []), prune_naive_structured=self.prune_naive_structured, prune_l1_norm=self.prune_l1_unstructured, exclude_relu=self.exclude_relu, sigmoid_in_last_layer = self.sigmoid_in_last_layer).cuda().eval() #, prune_l1_norm=self.prune_l1_unstructured
         else:
-            self.model = Backbone(model_id=self.model_id, layers_needed=self.layers_needed, layer_cut=self.layer_cut, prune_output_layer=(False, []), prune_naive_structured=self.prune_naive_structured, prune_l1_norm=self.prune_l1_unstructured, exclude_relu=self.exclude_relu, sigmoid_in_last_layer = self.sigmoid_in_last_layer) # prune_l1_norm=self.prune_l1_unstructured,
-        
-        ### prune temp ###
-        if self.prune_naive_structured[0]:
+            self.model = Backbone(model_id=self.model_id, layers_needed=self.layers_needed, layer_cut=self.layer_cut, prune_output_layer=(False, []), prune_naive_structured=self.prune_naive_structured, prune_l1_norm=self.prune_l1_unstructured, exclude_relu=self.exclude_relu, sigmoid_in_last_layer = self.sigmoid_in_last_layer).eval() # prune_l1_norm=self.prune_l1_unstructured,
+        if self.iterative_pruning[0]:    
+            self.idx_chosen = list(range(128)) # TODO
+            for k in range(self.iterative_pruning[1]): 
+                print(f'\nIteration of iterative Pruning and/or channel selection: {k} of {self.iterative_pruning[1]}\n')
+                if self.pretrain_for_channel_selection:
+                    # print('Pretrain for channel selection ...')
+                    _ = self.select_channels()#total_embeddings, pretrain=True) # also prunes the model's output layer
+                ### prune temp ###
+                if self.prune_naive_structured[0]:
+                    self.model = prune_naive(self.model, self.prune_naive_structured[1])
+                if self.prune_structured_nni[0]:
+                    self.model = prune_model_nni(self.model, self.prune_structured_nni[1], self.prune_structured_nni[2])
+                ### prune temp ###
+
+        if self.prune_naive_structured[0] and not self.iterative_pruning[0]:
             self.model = prune_naive(self.model, self.prune_naive_structured[1])
-        if self.prune_l1_structured_nni[0]:
-            self.model = prune_model_l1_structured_nni(self.model, self.prune_l1_structured_nni[1])
-        ### prune temp ###
+        if self.prune_structured_nni[0]:
+            self.model = prune_model_nni(self.model, self.prune_structured_nni[1], self.prune_structured_nni[2])
         
         print('Train model summary:')
         summary(self.model, (1, 3, 224, 224), depth = 2, device = 'cuda' if self.cuda_active else 'cpu')
@@ -182,14 +196,11 @@ class PatchCore(pl.LightningModule):
             os.makedirs(self.log_path)
 
         # get Backbone
-        # del self.model
-        # if self.cuda_active:
-        #     self.model = Backbone(model_id=self.model_id, layers_needed=self.layers_needed, layer_cut=self.layer_cut, prune_output_layer=(False, []), prune_naive_structured=self.prune_naive_structured, prune_l1_norm=self.prune_l1_unstructured, exclude_relu=self.exclude_relu, sigmoid_in_last_layer = self.sigmoid_in_last_layer).cuda() #, prune_l1_norm=self.prune_l1_unstructured
-        # else:
-        #     self.model = Backbone(model_id=self.model_id, layers_needed=self.layers_needed, layer_cut=self.layer_cut, prune_output_layer=(False, []), prune_naive_structured=self.prune_naive_structured, prune_l1_norm=self.prune_l1_unstructured,exclude_relu=self.exclude_relu, sigmoid_in_last_layer = self.sigmoid_in_last_layer) # prune_l1_norm=self.prune_l1_unstructured,
-        # self.model.eval() # to stop running_var move (maybe not critical)
-        # if self.prune_naive_structured[0]:
-        #     self.model = prune_naive(self.model)
+        if self.cuda_active and torch.cuda.is_available():
+            self.model = torch.load(os.path.join(self.embedding_dir_path,'bacbone.pth')).cuda()
+        else:
+            self.model = torch.load(os.path.join(self.embedding_dir_path,'bacbone.pth'), map_location=torch.device('cpu'))
+        self.model.eval()
         
         # load coreset and initialize knn search
         if self.faiss_standard or self.faiss_quantized:
@@ -228,6 +239,79 @@ class PatchCore(pl.LightningModule):
         else:
             self.embedding_np = np.append(self.embedding_np, reshape_embedding(np.array(embedding)), axis=0)#.extend(reshape_embedding(np.array(embedding)))
             
+    def select_channels_core(self, total_embeddings):
+        if self.reduce_via_std:
+            percentile_std = 100-self.reduction_factor
+            this_idx_chosen = set(np.argwhere(np.std(total_embeddings, axis=0)>np.percentile(np.std(total_embeddings,axis=0), percentile_std))[:,0])
+            idx_chosen_set = set(self.idx_chosen).intersection(this_idx_chosen)
+            self.idx_chosen = np.array(list(idx_chosen_set), dtype=np.int32)
+            # self.idx_chosen = np.append(self.idx_chosen, np.argwhere(np.std(total_embeddings, axis=0)>np.percentile(np.std(total_embeddings,axis=0), percentile_std))[:,0])
+            # total_embeddings = np.take(total_embeddings, self.idx_chosen, axis=1)#total_embeddings[:,self.idx_with_high_std] # c contigous
+        if self.normalize:
+            self.mean = np.mean(total_embeddings, axis=0)
+            self.std = np.std(total_embeddings, axis=0)
+            self.std = self.std + 5e-2*np.mean(self.std) # add 5% of mean to std to avoid division by zero
+            total_embeddings = (total_embeddings-self.mean)/self.std
+            # total_embeddings[:,self.std<1e-15] = 0.0
+        if self.reduce_via_entropy:
+            percentile_entropy = 100-self.reduction_factor
+            total_embeddings_copy = total_embeddings.copy()
+            total_embeddings_copy[total_embeddings_copy<1e-15] = 1e-15
+            entropy = -np.sum(total_embeddings_copy*np.log2(total_embeddings_copy), axis=0)#.shape
+            # self.idx_chosen = np.argwhere(entropy>np.percentile(entropy, percentile_entropy))[:,0]
+            self.idx_chosen = np.append(self.idx_chosen, np.argwhere(np.std(total_embeddings, axis=0)>np.percentile(np.std(total_embeddings,axis=0), percentile_entropy))[:,0])
+            # total_embeddings = np.take(total_embeddings, self.idx_chosen, axis=1)
+        if self.reduce_via_entropy_normed:
+            percentile_entropy = 100-self.reduction_factor
+            total_embeddings_copy = total_embeddings.copy()
+            total_embeddings_copy[total_embeddings_copy<1e-15] = 1e-15
+            normed_embeddings = total_embeddings_copy/total_embeddings_copy.sum(axis=1, keepdims=1)
+            entropy = -np.sum(normed_embeddings*np.log2(normed_embeddings), axis=0)#.shape
+            # self.idx_chosen = np.argwhere(entropy>np.percentile(entropy, percentile_entropy))[:,0]
+            self.idx_chosen = np.append(self.idx_chosen, np.argwhere(np.std(total_embeddings, axis=0)>np.percentile(np.std(total_embeddings,axis=0), percentile_entropy))[:,0])
+            # total_embeddings = np.take(total_embeddings, self.idx_chosen, axis=1)
+        if self.weight_by_entropy:
+            total_embeddings_copy = total_embeddings.copy()
+            total_embeddings_copy[total_embeddings_copy<1e-15] = 1e-15
+            normed_embeddings = total_embeddings_copy/total_embeddings_copy.sum(axis=1, keepdims=1)
+            entropy = -np.sum(normed_embeddings*np.log2(normed_embeddings), axis=0)#.shape
+            # self.weights = softmax(entropy) * total_embeddings.shape[1]
+            self.weights = entropy / np.sum(entropy) * total_embeddings.shape[1]
+            total_embeddings = np.multiply(total_embeddings, self.weights)
+        if (self.reduce_via_entropy or self.reduce_via_entropy_normed) and self.normalize and not self.reduce_via_std:
+            # self.idx_chosen = np.unique(self.idx_chosen)
+            self.std = np.take(self.std, self.idx_chosen)#, axis=0)
+            self.mean = np.take(self.mean, self.idx_chosen)#, axis=0)
+        if self.reduce_via_entropy or self.reduce_via_entropy_normed or self.reduce_via_std:
+            # self.idx_chosen = np.unique(self.idx_chosen)
+            print('Number of channels chosen: ', len(self.idx_chosen))
+            total_embeddings = np.take(total_embeddings, self.idx_chosen, axis=1)
+        if self.save_embeddings:
+            file_name_embeddings = input('file name for embeddings:\n')
+            np.save(file_name_embeddings + '.npy', total_embeddings)
+        if (self.prune_output_layer[0] and (self.reduce_via_entropy or self.reduce_via_std or self.reduce_via_entropy_normed)):# or self.prune_l1_unstructured:
+            # print('Pruning ...')        
+            self.prune_output_layer = (True, self.idx_chosen)
+            self.model = Backbone(model_id=self.model_id, layers_needed=self.layers_needed, layer_cut=self.layer_cut, prune_output_layer=self.prune_output_layer, prune_l1_norm=self.prune_l1_unstructured, exclude_relu = self.exclude_relu, sigmoid_in_last_layer = self.sigmoid_in_last_layer)
+        return total_embeddings
+        
+    def select_channels(self,total_embeddings=None):
+        '''
+        Based on either std or entropy, channels are selected and the embedding is reduced. Also the model gets pruned accordingly, if desired.
+        '''
+        if not self.pretrain_for_channel_selection:
+            total_embeddings = self.select_channels_core(total_embeddings)
+        else:
+            print('Pretrain and select channels ...')
+            train_loader = self.train_dataloader()
+            self.embedding_np = np.array([])
+            for batch_idx, batch in enumerate(train_loader):
+                batch[0] = batch[0].to(device='cuda' if self.cuda_active_training else 'cpu')
+                self.training_step(batch=batch, batch_idx=batch_idx)
+            total_embeddings = self.embedding_np
+            total_embeddings = self.select_channels_core(total_embeddings) #TODO naming of variables
+        return total_embeddings
+    
     def training_epoch_end(self, outputs):
         if self.save_features:
             file_name_features = input('file name for features:\n')
@@ -241,49 +325,11 @@ class PatchCore(pl.LightningModule):
             np.save(file_name_features + '.npy', feature_save)
         total_embeddings = self.embedding_np
 
-        if self.reduce_via_std:
-            percentile_std = self.reduction_factor
-            self.idx_chosen = np.argwhere(np.std(total_embeddings, axis=0)>np.percentile(np.std(total_embeddings,axis=0), percentile_std))[:,0]
-            total_embeddings = np.take(total_embeddings, self.idx_chosen, axis=1)#total_embeddings[:,self.idx_with_high_std] # c contigous
-        if self.normalize:
-            self.mean = np.mean(total_embeddings, axis=0)
-            self.std = np.std(total_embeddings, axis=0)
-            self.std = self.std + 5e-2*np.mean(self.std) # add 5% of mean to std to avoid division by zero
-            total_embeddings = (total_embeddings-self.mean)/self.std
-            # total_embeddings[:,self.std<1e-15] = 0.0
-        if self.reduce_via_entropy:
-            percentile_entropy = 100-self.reduction_factor
-            total_embeddings_copy = total_embeddings.copy()
-            total_embeddings_copy[total_embeddings_copy<1e-15] = 1e-15
-            entropy = -np.sum(total_embeddings_copy*np.log2(total_embeddings_copy), axis=0)#.shape
-            self.idx_chosen = np.argwhere(entropy>np.percentile(entropy, percentile_entropy))[:,0]
-            total_embeddings = np.take(total_embeddings, self.idx_chosen, axis=1)
-        elif self.reduce_via_entropy_normed:
-            percentile_entropy = 100-self.reduction_factor
-            total_embeddings_copy = total_embeddings.copy()
-            total_embeddings_copy[total_embeddings_copy<1e-15] = 1e-15
-            normed_embeddings = total_embeddings_copy/total_embeddings_copy.sum(axis=1, keepdims=1)
-            entropy = -np.sum(normed_embeddings*np.log2(normed_embeddings), axis=0)#.shape
-            self.idx_chosen = np.argwhere(entropy>np.percentile(entropy, percentile_entropy))[:,0]
-            total_embeddings = np.take(total_embeddings, self.idx_chosen, axis=1)
-        if self.weight_by_entropy:
-            total_embeddings_copy = total_embeddings.copy()
-            total_embeddings_copy[total_embeddings_copy<1e-15] = 1e-15
-            normed_embeddings = total_embeddings_copy/total_embeddings_copy.sum(axis=1, keepdims=1)
-            entropy = -np.sum(normed_embeddings*np.log2(normed_embeddings), axis=0)#.shape
-            # self.weights = softmax(entropy) * total_embeddings.shape[1]
-            self.weights = entropy / np.sum(entropy) * total_embeddings.shape[1]
-            total_embeddings = np.multiply(total_embeddings, self.weights)
-        if (self.reduce_via_entropy or self.reduce_via_entropy_normed) and self.normalize and not self.reduce_via_std:
-            self.std = np.take(self.std, self.idx_chosen)#, axis=0)
-            self.mean = np.take(self.mean, self.idx_chosen)#, axis=0)
-        if self.save_embeddings:
-            file_name_embeddings = input('file name for embeddings:\n')
-            np.save(file_name_embeddings + '.npy', total_embeddings)
-        if (self.prune_output_layer[0] and (self.reduce_via_entropy or self.reduce_via_std or self.reduce_via_entropy_normed)):# or self.prune_l1_unstructured:
-            # print('Pruning ...')        
-            self.prune_output_layer = (True, self.idx_chosen)
-            # self.model = Backbone(model_id=self.model_id, layers_needed=self.layers_needed, layer_cut=self.layer_cut, prune_output_layer=self.prune_output_layer, prune_l1_norm=self.prune_l1_unstructured, exclude_relu = self.exclude_relu, sigmoid_in_last_layer = self.sigmoid_in_last_layer)
+        # select channels
+        self.pretrain_for_channel_selection_copy = self.pretrain_for_channel_selection#.copy()
+        self.pretrain_for_channel_selection = False
+        
+        total_embeddings = self.select_channels(total_embeddings)#, pretrain=False)
         # Random projection
         if self.coreset_sampling_ratio == 1.0:
             self.embedding_coreset = total_embeddings
@@ -332,6 +378,9 @@ class PatchCore(pl.LightningModule):
         else:
             with open(os.path.join(self.embedding_dir_path, 'embedding.pickle'), 'wb') as f:
                 pickle.dump(self.embedding_coreset, f)
+        
+        # save model
+        torch.save(self.model, os.path.join(self.embedding_dir_path,'bacbone.pth'))
             
     def test_step(self, batch, batch_idx):
         '''
@@ -764,8 +813,19 @@ if __name__ == '__main__':
     model.cuda_active = True
     # model.prune_l1_unstructured = (True, 0.8)
     # model.prune_naive_structured = (True, 0.2)
-    # model.prune_l1_structured_nni = (True, 0.2)
-    model.sigmoid_in_last_layer = True
+    # # model.prune_l1_structured_nni = (True, 0.2)
+    # model.sigmoid_in_last_layer = True
+    
+    model.reduce_via_std = True
+    model.reduce_via_entropy_normed = False
+    # model.faiss_standard = True
+    # model.sigmoid_in_last_layer = True
+
+    model.reduction_factor = 90
+    model.prune_output_layer = (False, [])
+    model.prune_structured_nni = (True, 0.05, 'L1')
+    model.iterative_pruning = (True, 10)
+    model.pretrain_for_channel_selection = True
     
     if args.phase == 'train':
         trainer = pl.Trainer.from_argparse_args(args, default_root_dir=os.path.join(args.project_root_path, args.category), max_epochs=args.num_epochs, accelerator='gpu', devices=1, precision = '32') # allow gpu for training    
