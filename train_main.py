@@ -1,7 +1,7 @@
 import os
-from backbone import Backbone, prune_naive, prune_model_nni, compress_model_nni
+from backbone import Backbone, prune_naive, prune_model_nni, compress_model_nni, prune_output_layer
 from datasets import MVTecDataset
-from utils import min_max_norm, heatmap_on_image, cvt2heatmap, distance_matrix, record_gpu, modified_kNN_score_calc, prep_dirs, softmax
+from utils import min_max_norm, heatmap_on_image, cvt2heatmap, record_gpu, modified_kNN_score_calc, prep_dirs #  distance_matrix, softmax
 from pooling import adaptive_pooling
 from embedding import reshape_embedding, embedding_concat_frame
 from search import KNN, NN
@@ -85,7 +85,7 @@ class PatchCore(pl.LightningModule):
         self.prune_output_layer = (False, []) 
         self.prune_l1_unstructured = (False, 0.0) # utilizing the build-in torch pruning
         self.prune_torch_pruning = (False, 0.0) # using the pytorch-pruning library
-        self.prune_structured_nni = (False, 0.0, 'L1') # options: 'FPGM', 'L2', utilizing the nni pruning (microsoft)
+        self.prune_structured_nni = (False, [], 'L1') # options: 'FPGM', 'L2', utilizing the nni pruning (microsoft)
         self.exclude_relu = False
         self.sigmoid_in_last_layer = False
 
@@ -174,10 +174,26 @@ class PatchCore(pl.LightningModule):
         self.output_shape = embeddings.shape # per picture
         self.idx_chosen = list(range(self.output_shape[1]))
         
+        for name, module in self.model.named_modules():
+            if isinstance(module, torch.nn.Conv2d):
+                if name != '2.block_2.final_3':  # Skip the last Conv2d layer
+                    # continue
+                    config_list.append({
+                        'op_types': ['Conv2d'],  # Prune only Conv2d layers
+                        'op_names': [name],  
+                        'sparsity': 0.2
+                    })
+                else:
+                    print('skipping')
+                    config_list.append({
+                        'op_names': [name],  # Prune the specific layer
+                        'exclude': True  # Exclude this layer for pruning
+                    })
+        
         if self.iterative_pruning[0]:    
             # self.idx_chosen = list(range(128)) # TODO
             for k in range(self.iterative_pruning[1]): 
-                print(f'\nIteration of iterative Pruning and/or channel selection: {k} of {self.iterative_pruning[1]}\n')
+                print(f'\nIteration of iterative Pruning and/or channel selection: {k+1} of {self.iterative_pruning[1]}\n')
                 if self.pretrain_for_channel_selection:
                     # print('Pretrain for channel selection ...')
                     _ = self.select_channels()#total_embeddings, pretrain=True) # also prunes the model's output layer
@@ -258,7 +274,7 @@ class PatchCore(pl.LightningModule):
         if self.reduce_via_std:
             percentile_std = 100-self.reduction_factor 
             this_idx_chosen = set(np.argwhere(np.std(total_embeddings, axis=0)>np.percentile(np.std(total_embeddings,axis=0), percentile_std))[:,0])
-            idx_chosen_set = set(self.idx_chosen).intersection(this_idx_chosen)
+            idx_chosen_set = this_idx_chosen#set(self.idx_chosen).intersection(this_idx_chosen)
             self.idx_chosen = np.array(list(idx_chosen_set), dtype=np.int32)
             # self.idx_chosen = np.append(self.idx_chosen, np.argwhere(np.std(total_embeddings, axis=0)>np.percentile(np.std(total_embeddings,axis=0), percentile_std))[:,0])
             # total_embeddings = np.take(total_embeddings, self.idx_chosen, axis=1)#total_embeddings[:,self.idx_with_high_std] # c contigous
@@ -307,10 +323,12 @@ class PatchCore(pl.LightningModule):
         if (self.prune_output_layer[0] and (self.reduce_via_entropy or self.reduce_via_std or self.reduce_via_entropy_normed)):# or self.prune_l1_unstructured:
             # print('Pruning ...')
             self.prune_output_layer = (True, self.idx_chosen)
-            if self.cuda_active_training:
-                self.model = Backbone(model_id=self.model_id, layers_needed=self.layers_needed, layer_cut=self.layer_cut, prune_output_layer=self.prune_output_layer, prune_l1_norm=self.prune_l1_unstructured, exclude_relu = self.exclude_relu, sigmoid_in_last_layer = self.sigmoid_in_last_layer).cuda()
-            else:
-                self.model = Backbone(model_id=self.model_id, layers_needed=self.layers_needed, layer_cut=self.layer_cut, prune_output_layer=self.prune_output_layer, prune_l1_norm=self.prune_l1_unstructured, exclude_relu = self.exclude_relu, sigmoid_in_last_layer = self.sigmoid_in_last_layer)
+            self.model = prune_output_layer(self.model, self.idx_chosen)
+            
+            # if self.cuda_active_training:
+            #     self.model = Backbone(model_id=self.model_id, layers_needed=self.layers_needed, layer_cut=self.layer_cut, prune_output_layer=self.prune_output_layer, prune_l1_norm=self.prune_l1_unstructured, exclude_relu = self.exclude_relu, sigmoid_in_last_layer = self.sigmoid_in_last_layer).cuda()
+            # else:
+            #     self.model = Backbone(model_id=self.model_id, layers_needed=self.layers_needed, layer_cut=self.layer_cut, prune_output_layer=self.prune_output_layer, prune_l1_norm=self.prune_l1_unstructured, exclude_relu = self.exclude_relu, sigmoid_in_last_layer = self.sigmoid_in_last_layer)
         return total_embeddings
         
     def select_channels(self,total_embeddings=None):
@@ -780,10 +798,11 @@ class PatchCore(pl.LightningModule):
                 'exclude_relu': self.exclude_relu,
                 'sigmoid_in_last_layer': self.sigmoid_in_last_layer,
                 'prune_output_layer': f'{self.prune_output_layer[0]} #{len(self.prune_output_layer[1])}',
-                'prune_structured_nni': f'{self.prune_structured_nni[0]} (Percentage: {self.prune_structured_nni[1]}; Method: {self.prune_structured_nni[2]})',
+                'prune_structured_nni': f'{self.prune_structured_nni[0]} (Percentage: {self.prune_structured_nni[1][0]["sparsity"]}; Method: {self.prune_structured_nni[2]})',
                 'prune_l1_unstructured': f'{self.prune_l1_unstructured[0]} (Percentage: {self.prune_l1_unstructured[1]})',
                 'prune_pytorch_pruning': f'{self.prune_torch_pruning[0]} (Percentage: {self.prune_torch_pruning[1]})',
                 'iterative_pruning': f'{self.iterative_pruning[0]} (Iterations: {self.iterative_pruning[1]})',
+                'pretrain_for_channel_selection': self.pretrain_for_channel_selection_copy,
                 'adapted_score_calc': self.adapted_score_calc,
                 'n_neighbors': self.n_neighbors,
                 'n_next_patches': self.n_next_patches,
@@ -866,14 +885,17 @@ if __name__ == '__main__':
     # model.pretrain_for_channel_selection = True
     # model.quantize_model_with_nni = False
     # model.measure_inference = True
-    model.coreset_sampling_method = 'random_selection'
+    model.coreset_sampling_method = 'k_center_greedy'
     # model.cuda_active_training = 
     model.iterative_pruning = (True, 2)
     model.pretrain_for_channel_selection = True
-    model.reduce_via_entropy_normed = True
-    model.prune_structured_nni = (True, 0.05, 'L1')
-
+    model.reduce_via_std = True
+    config_list = list() # will be properly defined in def.select_channels_core
     
+    # has to be adjusted through the model args
+    model.prune_structured_nni = (True, config_list, 'L1')
+    model.prune_output_layer = (True, [])
+    model.sigmoid_in_last_layer = True    
     if args.phase == 'train':
         trainer = pl.Trainer.from_argparse_args(args, default_root_dir=os.path.join(args.project_root_path, args.category), max_epochs=args.num_epochs, accelerator='gpu', devices=1, precision = '32') # allow gpu for training    
         trainer.fit(model)
