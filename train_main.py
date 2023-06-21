@@ -1,5 +1,5 @@
 import os
-from backbone import Backbone, prune_naive, prune_model_nni
+from backbone import Backbone, prune_naive, prune_model_nni, compress_model_nni
 from datasets import MVTecDataset
 from utils import min_max_norm, heatmap_on_image, cvt2heatmap, distance_matrix, record_gpu, modified_kNN_score_calc, prep_dirs, softmax
 from pooling import adaptive_pooling
@@ -46,13 +46,14 @@ class PatchCore(pl.LightningModule):
         # self.faiss_quantized_
         self.own_knn = True
         self.adapted_score_calc = False
+        self.coreset_sampling_method = 'k_center_greedy' # options: 'k_center_greedy', 'random_selection', 'sparse_projection'
         self.specific_number_of_examples = int(0)
         self.normalize = False
         self.quantization = False
         self.measure_inference = False
         self.number_of_reps = 50 # number of reps during measurement. Beacause we can assume a consistent estimator, results get more accurate with more reps
         self.warm_up_reps = 10 # before the actual measurement is done, we execute the process a couple of times without measurement to ensure that there is no influence of initialization and that the circumstances (e.g. thermal state of hardware) are representive.
-        self.cuda_active = False#torch.cuda.is_available()
+        self.cuda_active = False # should match trainer config, otherwise intput and model are not on the same device
         self.cuda_active_training = True
         self.dim_reduction = False
         self.num_workers = 12
@@ -69,20 +70,22 @@ class PatchCore(pl.LightningModule):
         self.reduce_via_entropy_normed = False
         self.pretrain_for_channel_selection = False
         self.iterative_pruning = (False, 0)
+        self.quantize_model_with_nni = False
         # self.idx_chosen = np.array([], dtype=np.int32)
+        self.idx_chosen = np.arange(128,dtype=np.int32)
         self.weight_by_entropy = False
         self.reduction_factor = 75
         self.pooling_strategy = ['default']#, 'max_1']#, 'first_trial']#, 'first_trial_max'] # 'first_trial'
 
         self.save_hyperparameters(args)
         
-        self.model_id = "RN34"
+        self.model_id = "WRN50"
         self.layers_needed = [2,3]#,3]#,3]#,3]
         self.layer_cut = True
-        self.prune_output_layer = (False, [])
-        self.prune_l1_unstructured = (False, 0.0)
-        self.prune_naive_structured = (False, 0.0)
-        self.prune_structured_nni = (False, 0.0, 'L1') # options: 'FPGM', 'L2'
+        self.prune_output_layer = (False, []) 
+        self.prune_l1_unstructured = (False, 0.0) # utilizing the build-in torch pruning
+        self.prune_torch_pruning = (False, 0.0) # using the pytorch-pruning library
+        self.prune_structured_nni = (False, 0.0, 'L1') # options: 'FPGM', 'L2', utilizing the nni pruning (microsoft)
         self.exclude_relu = False
         self.sigmoid_in_last_layer = False
 
@@ -159,30 +162,39 @@ class PatchCore(pl.LightningModule):
         self.embedding_dir_path, self.sample_path, self.source_code_save_path = prep_dirs(self.logger.log_dir, self.category)
         # get backbone
         if self.cuda_active_training:
-            self.model = Backbone(model_id=self.model_id, layers_needed=self.layers_needed, layer_cut=self.layer_cut, prune_output_layer=(False, []), prune_naive_structured=self.prune_naive_structured, prune_l1_norm=self.prune_l1_unstructured, exclude_relu=self.exclude_relu, sigmoid_in_last_layer = self.sigmoid_in_last_layer).cuda().eval() #, prune_l1_norm=self.prune_l1_unstructured
+            self.model = Backbone(model_id=self.model_id, layers_needed=self.layers_needed, layer_cut=self.layer_cut, prune_output_layer=(False, []), prune_torch_pruning=self.prune_torch_pruning, prune_l1_norm=self.prune_l1_unstructured, exclude_relu=self.exclude_relu, sigmoid_in_last_layer = self.sigmoid_in_last_layer).cuda().eval() #, prune_l1_norm=self.prune_l1_unstructured
+            dummy_input = torch.randn(1, 3, self.input_size, self.input_size).cuda()
         else:
-            self.model = Backbone(model_id=self.model_id, layers_needed=self.layers_needed, layer_cut=self.layer_cut, prune_output_layer=(False, []), prune_naive_structured=self.prune_naive_structured, prune_l1_norm=self.prune_l1_unstructured, exclude_relu=self.exclude_relu, sigmoid_in_last_layer = self.sigmoid_in_last_layer).eval() # prune_l1_norm=self.prune_l1_unstructured,
+            self.model = Backbone(model_id=self.model_id, layers_needed=self.layers_needed, layer_cut=self.layer_cut, prune_output_layer=(False, []), prune_torch_pruning=self.prune_torch_pruning, prune_l1_norm=self.prune_l1_unstructured, exclude_relu=self.exclude_relu, sigmoid_in_last_layer = self.sigmoid_in_last_layer).eval() # prune_l1_norm=self.prune_l1_unstructured,
+            dummy_input = torch.randn(1, 3, self.input_size, self.input_size)
+        # determine output shape of model
+
+        features = self.feature_extraction(dummy_input)
+        embeddings = self.feature_embedding(features, True, 1)
+        self.output_shape = embeddings.shape # per picture
+        self.idx_chosen = list(range(self.output_shape[1]))
+        
         if self.iterative_pruning[0]:    
-            self.idx_chosen = list(range(128)) # TODO
+            # self.idx_chosen = list(range(128)) # TODO
             for k in range(self.iterative_pruning[1]): 
                 print(f'\nIteration of iterative Pruning and/or channel selection: {k} of {self.iterative_pruning[1]}\n')
                 if self.pretrain_for_channel_selection:
                     # print('Pretrain for channel selection ...')
                     _ = self.select_channels()#total_embeddings, pretrain=True) # also prunes the model's output layer
                 ### prune temp ###
-                if self.prune_naive_structured[0]:
-                    self.model = prune_naive(self.model, self.prune_naive_structured[1])
-                if self.prune_structured_nni[0]:
-                    self.model = prune_model_nni(self.model, self.prune_structured_nni[1], self.prune_structured_nni[2])
+                if self.prune_torch_pruning[0]:
+                    self.model = prune_naive(self.model, self.prune_torch_pruning[1])
+                if self.prune_structured_nni[0]: 
+                    self.model = prune_model_nni(self.model, self.prune_structured_nni[1], self.prune_structured_nni[2]) # whole net
                 ### prune temp ###
 
-        if self.prune_naive_structured[0] and not self.iterative_pruning[0]:
-            self.model = prune_naive(self.model, self.prune_naive_structured[1])
+        if self.prune_torch_pruning[0] and not self.iterative_pruning[0]:
+            self.model = prune_naive(self.model, self.prune_torch_pruning[1])
         if self.prune_structured_nni[0]:
             self.model = prune_model_nni(self.model, self.prune_structured_nni[1], self.prune_structured_nni[2])
         
-        print('Train model summary:')
-        summary(self.model, (1, 3, 224, 224), depth = 2, device = 'cuda' if self.cuda_active else 'cpu')
+        # print('Train model summary:')
+        # summary(self.model, (1, 3, 224, 224), depth = 2, device = 'cuda' if self.cuda_active else 'cpu')
         self.model.eval() # to stop running_var move (maybe not critical)        
         # initialize numpy array for embeddings
         self.embedding_np = np.array([])
@@ -197,9 +209,10 @@ class PatchCore(pl.LightningModule):
 
         # get Backbone
         if self.cuda_active and torch.cuda.is_available():
-            self.model = torch.load(os.path.join(self.embedding_dir_path,'bacbone.pth')).cuda()
+            self.model = torch.load(os.path.join(self.embedding_dir_path,'backbone.pth')).cuda()
         else:
-            self.model = torch.load(os.path.join(self.embedding_dir_path,'bacbone.pth'), map_location=torch.device('cpu'))
+            self.model = torch.load(os.path.join(self.embedding_dir_path,'backbone.pth'))#.cpu()#, map_location=torch.device('cpu'))
+            self.model.to(device='cpu')
         self.model.eval()
         
         # load coreset and initialize knn search
@@ -217,6 +230,8 @@ class PatchCore(pl.LightningModule):
         
         # initialize results list
         self.init_results_list()
+        
+        summary(self.model, depth=5, input_size=(1,3,224,224), col_names=['input_size', 'output_size', 'trainable', 'mult_adds', 'num_params'])
         
     def training_step(self, batch, batch_idx): # save locally aware patch features
         x, _, _, _, _ = batch
@@ -241,7 +256,7 @@ class PatchCore(pl.LightningModule):
             
     def select_channels_core(self, total_embeddings):
         if self.reduce_via_std:
-            percentile_std = 100-self.reduction_factor
+            percentile_std = 100-self.reduction_factor 
             this_idx_chosen = set(np.argwhere(np.std(total_embeddings, axis=0)>np.percentile(np.std(total_embeddings,axis=0), percentile_std))[:,0])
             idx_chosen_set = set(self.idx_chosen).intersection(this_idx_chosen)
             self.idx_chosen = np.array(list(idx_chosen_set), dtype=np.int32)
@@ -270,7 +285,7 @@ class PatchCore(pl.LightningModule):
             # self.idx_chosen = np.argwhere(entropy>np.percentile(entropy, percentile_entropy))[:,0]
             self.idx_chosen = np.append(self.idx_chosen, np.argwhere(np.std(total_embeddings, axis=0)>np.percentile(np.std(total_embeddings,axis=0), percentile_entropy))[:,0])
             # total_embeddings = np.take(total_embeddings, self.idx_chosen, axis=1)
-        if self.weight_by_entropy:
+        if self.weight_by_entropy: # 
             total_embeddings_copy = total_embeddings.copy()
             total_embeddings_copy[total_embeddings_copy<1e-15] = 1e-15
             normed_embeddings = total_embeddings_copy/total_embeddings_copy.sum(axis=1, keepdims=1)
@@ -290,9 +305,12 @@ class PatchCore(pl.LightningModule):
             file_name_embeddings = input('file name for embeddings:\n')
             np.save(file_name_embeddings + '.npy', total_embeddings)
         if (self.prune_output_layer[0] and (self.reduce_via_entropy or self.reduce_via_std or self.reduce_via_entropy_normed)):# or self.prune_l1_unstructured:
-            # print('Pruning ...')        
+            # print('Pruning ...')
             self.prune_output_layer = (True, self.idx_chosen)
-            self.model = Backbone(model_id=self.model_id, layers_needed=self.layers_needed, layer_cut=self.layer_cut, prune_output_layer=self.prune_output_layer, prune_l1_norm=self.prune_l1_unstructured, exclude_relu = self.exclude_relu, sigmoid_in_last_layer = self.sigmoid_in_last_layer)
+            if self.cuda_active_training:
+                self.model = Backbone(model_id=self.model_id, layers_needed=self.layers_needed, layer_cut=self.layer_cut, prune_output_layer=self.prune_output_layer, prune_l1_norm=self.prune_l1_unstructured, exclude_relu = self.exclude_relu, sigmoid_in_last_layer = self.sigmoid_in_last_layer).cuda()
+            else:
+                self.model = Backbone(model_id=self.model_id, layers_needed=self.layers_needed, layer_cut=self.layer_cut, prune_output_layer=self.prune_output_layer, prune_l1_norm=self.prune_l1_unstructured, exclude_relu = self.exclude_relu, sigmoid_in_last_layer = self.sigmoid_in_last_layer)
         return total_embeddings
         
     def select_channels(self,total_embeddings=None):
@@ -331,16 +349,19 @@ class PatchCore(pl.LightningModule):
         
         total_embeddings = self.select_channels(total_embeddings)#, pretrain=False)
         # Random projection
+        if self.quantize_model_with_nni:
+            self.model = compress_model_nni(self.model)
+
         if self.coreset_sampling_ratio == 1.0:
             self.embedding_coreset = total_embeddings
         else:                  
-            if False: # two different implementation that yield the same result (approximately)
+            if self.coreset_sampling_method.__contains__('sparse_projection'): # two different implementation that yield the same result (approximately)
                 self.randomprojector = SparseRandomProjection(n_components='auto', eps=0.9) # 'auto' => Johnson-Lindenstrauss lemma
                 self.randomprojector.fit(total_embeddings)
                 # Coreset Subsampling
                 selector = kCenterGreedy(total_embeddings,0,0)
                 selected_idx = selector.select_batch(model=self.randomprojector, already_selected=[], N=int(total_embeddings.shape[0]*self.coreset_sampling_ratio))
-            else:
+            elif self.coreset_sampling_method.__contains__('k_center_greedy'):
                 # total_embeddings_copy = total_embeddings.astype(np.float32)
                 if self.specific_number_of_examples > 0:
                     sampling_ratio = float(self.specific_number_of_examples/total_embeddings.shape[0])
@@ -351,6 +372,8 @@ class PatchCore(pl.LightningModule):
                 else:
                     sampler = k_center_greedy.KCenterGreedy(embedding=torch.from_numpy(total_embeddings), sampling_ratio=sampling_ratio)
                 selected_idx = sampler.select_coreset_idxs()
+            elif self.coreset_sampling_method.__contains__('random_selection'):
+                selected_idx = np.random.choice(total_embeddings.shape[0], int(total_embeddings.shape[0]*self.coreset_sampling_ratio), replace=False)
             
             self.embedding_coreset = total_embeddings[selected_idx]
         # summary(self.model, depth=5, input_size=(1,3,224,224), col_names=['input_size', 'output_size', 'trainable', 'mult_adds', 'num_params'])   
@@ -362,7 +385,7 @@ class PatchCore(pl.LightningModule):
         if self.faiss_quantized:
             # if False:
             nlist = 20 if self.embedding_coreset.shape[0] > 20 else self.embedding_coreset.shape[0]
-            n_probe = 5 # defaul 1
+            n_probe = 5 # defaul 1 # TODO
             quantizer = faiss.IndexFlatL2(self.embedding_coreset.shape[1])
             self.index = faiss.IndexIVFFlat(quantizer, self.embedding_coreset.shape[1], nlist, faiss.METRIC_L2)
             assert not self.index.is_trained
@@ -380,7 +403,7 @@ class PatchCore(pl.LightningModule):
                 pickle.dump(self.embedding_coreset, f)
         
         # save model
-        torch.save(self.model, os.path.join(self.embedding_dir_path,'bacbone.pth'))
+        torch.save(self.model, os.path.join(self.embedding_dir_path,'backbone.pth'))
             
     def test_step(self, batch, batch_idx):
         '''
@@ -388,6 +411,11 @@ class PatchCore(pl.LightningModule):
         '''
         if self.measure_inference:
             # initialize dict
+            if self.cuda_active and torch.cuda.is_available():
+                self.model.to(device='cuda')
+            else:
+                self.model.to(device='cpu')
+            
             run_times = {
                     '#1 feature extraction cpu': [],
                     '#2 feature extraction gpu': [],
@@ -479,7 +507,7 @@ class PatchCore(pl.LightningModule):
                 pd_run_times.to_csv(file_path)
         
         else:
-            _, _, score_patches, score, anomaly_map = self.test_step_core(batch=batch, measure=False)                # calculating of scores and saving of results
+            _, _, score_patches, score, anomaly_map = self.test_step_core(batch=batch, measure=False) # calculating of scores and saving of results
             # print(score)Fprune
         if type(score_patches) == list:
             results = (score_patches, anomaly_map)
@@ -587,6 +615,8 @@ class PatchCore(pl.LightningModule):
         '''
         if self.cuda_active:
             x = x.cuda()
+        # else:
+        #     x = x.cpu()
         if False:#self.pruning and (self.reduce_via_entropy or self.reduce_via_std): # TODO
             # output = self(x)
             # output = np.array(output[0].cpu())
@@ -750,15 +780,22 @@ class PatchCore(pl.LightningModule):
                 'exclude_relu': self.exclude_relu,
                 'sigmoid_in_last_layer': self.sigmoid_in_last_layer,
                 'prune_output_layer': f'{self.prune_output_layer[0]} #{len(self.prune_output_layer[1])}',
+                'prune_structured_nni': f'{self.prune_structured_nni[0]} (Percentage: {self.prune_structured_nni[1]}; Method: {self.prune_structured_nni[2]})',
+                'prune_l1_unstructured': f'{self.prune_l1_unstructured[0]} (Percentage: {self.prune_l1_unstructured[1]})',
+                'prune_pytorch_pruning': f'{self.prune_torch_pruning[0]} (Percentage: {self.prune_torch_pruning[1]})',
+                'iterative_pruning': f'{self.iterative_pruning[0]} (Iterations: {self.iterative_pruning[1]})',
                 'adapted_score_calc': self.adapted_score_calc,
                 'n_neighbors': self.n_neighbors,
                 'n_next_patches': self.n_next_patches,
                 'coreset_sampling_ratio': self.coreset_sampling_ratio,
                 'reduce_via_std': self.reduce_via_std,
                 'reduce_via_entropy': self.reduce_via_entropy,
+                'quantize_model_with_nni': self.quantize_model_with_nni,
                 'reduce_via_entropy_normed': self.reduce_via_entropy_normed,
                 'reduce_factor': self.reduction_factor,
-                'coreset_size': self.embedding_coreset.shape,
+                'coreset_size': self.embedding_coreset.shape[0],
+                'resulting_feature_length': self.embedding_coreset.shape[1],
+                'resolution_of_patches': np.sqrt(self.output_shape[1]),
                 'normalize_output': self.normalize,
                 'faiss_standard': self.faiss_standard,
                 'faiss_quantized': self.faiss_quantized,
@@ -810,27 +847,38 @@ if __name__ == '__main__':
     model.model_id = 'RN34'
     model.layer_cut = True
     model.layers_needed = [2]
-    model.cuda_active = True
+    model.cuda_active = True # should match trainer config
     # model.prune_l1_unstructured = (True, 0.8)
-    # model.prune_naive_structured = (True, 0.2)
+    # model.prune_torch_pruning = (True, 0.2)
     # # model.prune_l1_structured_nni = (True, 0.2)
     # model.sigmoid_in_last_layer = True
     
-    model.reduce_via_std = True
-    model.reduce_via_entropy_normed = False
-    # model.faiss_standard = True
-    # model.sigmoid_in_last_layer = True
+    # model.reduce_via_std = True
+    # model.reduce_via_entropy_normed = False
+    # # model.faiss_standard = True
+    # # model.sigmoid_in_last_layer = True
 
-    model.reduction_factor = 90
-    model.prune_output_layer = (False, [])
-    model.prune_structured_nni = (True, 0.05, 'L1')
-    model.iterative_pruning = (True, 10)
+    # model.reduction_factor = 90
+    # model.prune_output_layer = (True, [])
+    # model.prune_structured_nni = (False, 0.05, 'L1')
+    # model.prune_torch_pruning = (True, 0.05)
+    # model.iterative_pruning = (True, 2)
+    # model.pretrain_for_channel_selection = True
+    # model.quantize_model_with_nni = False
+    # model.measure_inference = True
+    model.coreset_sampling_method = 'random_selection'
+    # model.cuda_active_training = 
+    model.iterative_pruning = (True, 2)
     model.pretrain_for_channel_selection = True
+    model.reduce_via_entropy_normed = True
+    model.prune_structured_nni = (True, 0.05, 'L1')
+
     
     if args.phase == 'train':
         trainer = pl.Trainer.from_argparse_args(args, default_root_dir=os.path.join(args.project_root_path, args.category), max_epochs=args.num_epochs, accelerator='gpu', devices=1, precision = '32') # allow gpu for training    
         trainer.fit(model)
-        trainer = pl.Trainer.from_argparse_args(args, default_root_dir=os.path.join(args.project_root_path, args.category), max_epochs=args.num_epochs, accelerator='gpu', devices=1, precision='32') # but not for testing
+        # os.environ["CUDA_VISIBLE_DEVICES"]=""
+        trainer = pl.Trainer.from_argparse_args(args, default_root_dir=os.path.join(args.project_root_path, args.category), max_epochs=args.num_epochs, accelerator='cpu', devices=1, precision='32') # but not for testing
         trainer.test(model)
     elif args.phase == 'test':
         trainer = pl.Trainer.from_argparse_args(args, default_root_dir=os.path.join(args.project_root_path, args.category), max_epochs=args.num_epochs, gpus=0)

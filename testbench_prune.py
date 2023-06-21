@@ -58,7 +58,7 @@ class TestContainer():
                     if cat == 'own' and not only_accuracy:
                         model.measure_inference = True
                         model.cuda_active_training = True
-                        model.cuda_active = True
+                        model.cuda_active = False
                         trainer = pl.Trainer.from_argparse_args(args, default_root_dir=os.path.join(args.project_root_path, args.category), max_epochs=args.num_epochs, accelerator='gpu', devices=1, precision = '32') # allow gpu for training    
                         trainer.fit(model)
                         model.cuda_active = False
@@ -71,7 +71,6 @@ class TestContainer():
                         model.num_workers = 12
                         trainer = pl.Trainer.from_argparse_args(args, default_root_dir=os.path.join(args.project_root_path, args.category), max_epochs=args.num_epochs, accelerator='gpu', devices=1, precision = '32') # allow gpu for training    
                         trainer.fit(model)
-                        model.cuda_active = False # temp
                         trainer = pl.Trainer.from_argparse_args(args, default_root_dir=os.path.join(args.project_root_path, args.category), max_epochs=args.num_epochs, accelerator='cpu', devices=1, precision='32') # but not for testing
                         trainer.test(model)    
                     if torch.cuda.is_available():
@@ -200,8 +199,9 @@ if __name__ == '__main__':
     # model.reduction_factor = 30
     
 
-    run_id_prefix = 'prune_1506_nni-L2-'
-    pruning_factors = [0.4,0.1, 0.2, 0.3, 0.5, 0.6, 0.7, 0.8, 0.9]
+    run_id_prefix = 'prune_2006_iterative_pruning-'
+    # pruning_factors = [0.4,0.1, 0.2, 0.3, 0.5, 0.6, 0.7, 0.8, 0.9]
+    pruning_factors = [0.03505]
 
     # for pf in pruning_factors:
     #     model.prune_l1_unstructured = (True, pf)
@@ -211,12 +211,30 @@ if __name__ == '__main__':
     # model.group_id = run_id_prefix + 'non_pruned'
     # manager.run(model)
     # manager.get_summarization()
-    
-    for pf in pruning_factors:
-        model.prune_l1_structured_nni = (True, pf) # TODO
-        model.group_id = run_id_prefix + 'pruned_by_' + str(pf)
-        manager.run(model)
-    model.prune_l1_structured_nni = (False, 0.0)    
-    model.group_id = run_id_prefix + 'non_pruned'
+
+    # model.reduce_via_std = True
+    # model.reduce_via_entropy_normed = True
+    model.faiss_standard = True
+    # model.sigmoid_in_last_layer = True
+
+    # model.reduction_factor = 80
+    model.prune_output_layer = (False, [])
+    model.reduction_factor = 90
+    model.reduce_via_std = True
+    model.pretrain_for_channel_selection = True
+    model.iterative_pruning = (True, 10)
+
+    pruning_methods = ['L2']#, 'L2', 'FPGM']
+
+    for pm in pruning_methods:
+        for pf in pruning_factors:
+            model.prune_structured_nni = (True, pf, pm) # TODO
+            model.group_id = run_id_prefix + f'iterative_pruning_(10)-pruned_by_0.4-L2-reduced_via_entropy_by_90'
+            manager.run(model)
+    model.prune_structured_nni = (True, 0.3, 'L2')
+    model.pretrain_for_channel_selection = False
+    model.iterative_pruning = (False, 0)    
+    model.group_id = run_id_prefix + 'no_iterative_pruning-pruned_by_0.4-L2-reduced_via_entropy_by_85'
+    model.reduction_factor = 85
     manager.run(model)
     print(manager.get_summarization())
