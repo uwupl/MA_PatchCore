@@ -16,6 +16,7 @@ class Backbone(nn.Module):
         prune_l1_norm: Tuple[bool, float] = (False, 0.0),
         exclude_relu: bool = False,
         sigmoid_in_last_layer: bool = False,
+        need_for_own_last_layer: bool = False,
     ) -> None:
         super().__init__()
         self.model_id = model_id
@@ -26,7 +27,7 @@ class Backbone(nn.Module):
         self.prune_torch_pruning = prune_torch_pruning
         self.exclude_relu = exclude_relu
         self.sigmoid_in_last_layer = sigmoid_in_last_layer
-        self.need_for_own_last_layer = sigmoid_in_last_layer or exclude_relu or prune_output_layer[0]
+        self.need_for_own_last_layer = sigmoid_in_last_layer or exclude_relu or prune_output_layer[0] or need_for_own_last_layer
         self.init_features()
         
         if self.model_id.__contains__('WRN50'):
@@ -413,13 +414,14 @@ class OwnBasicblock(torch.nn.Module):
         just pass OderedDicts, bottleneck like layer is created. For ResNet with Basicblocks. 
         '''
         super().__init__()
-        print(block_1)
-        print(block_2)
-        print(prune_output_layer)
-        print(idx_selected)
-        print(exclude_relu)
-        print(sigmoid_in_last_layer)
-        print(input_size)
+        # print(block_1)
+        # print(block_2)
+        # print(prune_output_layer)
+        # print(idx_selected)
+        # print(exclude_relu)
+        # print(sigmoid_in_last_layer)
+        # print(input_size)
+        print('HERE')
         self.block_1 = torch.nn.Sequential(block_1)
         self.block_2 = torch.nn.Sequential(block_2)
         if exclude_relu:
@@ -428,8 +430,8 @@ class OwnBasicblock(torch.nn.Module):
             self.output_activation = torch.nn.Sigmoid()#inplace=True)
         else:
             self.output_activation = torch.nn.ReLU(inplace=True)
-        print(self.block_1)
-        print(self.block_2)
+        # print(self.block_1)
+        # print(self.block_2)
         self.idx_selected = idx_selected
         self.prune_output_layer = prune_output_layer
         if len(self.idx_selected) > 0 and prune_output_layer:
@@ -447,8 +449,8 @@ class OwnBasicblock(torch.nn.Module):
             identity = x
         out = self.block_1(x)
         out = self.block_2(out)
-        print('out shape: ', out.shape)
-        print('identity shape: ', identity.shape)
+        # print('out shape: ', out.shape)
+        # print('identity shape: ', identity.shape)
         out += identity
         out = self.output_activation(out)
         return out
@@ -492,13 +494,13 @@ def prune_naive(model, pruning_perc):
         param.requires_grad = False  
     return model
 
-def prune_output_layer(model, idx_selected, input_size=(1,3,224,224)):
+def prune_output_layer(model, idx_selected, max_index, input_size=(1,3,224,224)):
     '''
     prune the output layer of the model, i.e., the last layer of the model. Removes the channels that are not selected.
     '''
 
-    channels_not_selected = [i for i in range(input_size[1]) if i not in idx_selected]
-
+    channels_not_selected = [i for i in range(max_index) if i not in idx_selected] # TODO dynamic 128
+    print('channels not selected: ', channels_not_selected)
     device = next(model.model.parameters()).device
 
     for param in model.model.parameters():
@@ -509,5 +511,8 @@ def prune_output_layer(model, idx_selected, input_size=(1,3,224,224)):
     print(group)
     if DG.check_pruning_group(group): # avoid full pruning, i.e., channels=0.  
         group.prune()
+        
+    for param in model.model.parameters():
+        param.requires_grad = False
 
     return model
