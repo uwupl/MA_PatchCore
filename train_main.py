@@ -1,5 +1,5 @@
 import os
-from backbone import Backbone, prune_naive, prune_model_nni, compress_model_nni, prune_output_layer
+from backbone import Backbone, prune_naive, prune_model_nni, prune_output_layer, quantize_model, compress_model_nni
 from datasets import MVTecDataset
 from utils import min_max_norm, heatmap_on_image, cvt2heatmap, record_gpu, modified_kNN_score_calc, prep_dirs #  distance_matrix, softmax
 from pooling import adaptive_pooling
@@ -44,7 +44,7 @@ class PatchCore(pl.LightningModule):
         self.faiss_standard = False # temp
         self.faiss_quantized = False
         # self.faiss_quantized_
-        self.own_knn = True
+        self.own_knn = False
         self.adapted_score_calc = False
         self.coreset_sampling_method = 'k_center_greedy' # options: 'k_center_greedy', 'random_selection', 'sparse_projection'
         self.specific_number_of_examples = int(0)
@@ -71,6 +71,7 @@ class PatchCore(pl.LightningModule):
         self.pretrain_for_channel_selection = False
         self.iterative_pruning = (False, 0)
         self.quantize_model_with_nni = False
+        self.quantize_model_pytorch = False
         # self.idx_chosen = np.array([], dtype=np.int32)
         self.idx_chosen = np.arange(128,dtype=np.int32) # TODO
         self.weight_by_entropy = False
@@ -163,7 +164,7 @@ class PatchCore(pl.LightningModule):
         self.embedding_dir_path, self.sample_path, self.source_code_save_path = prep_dirs(self.logger.log_dir, self.category)
         
         # get backbone
-        self.need_for_own_last_layer = self.prune_output_layer[0] # if relu is last activation, but we want to prune the output layer, we need to set this to true to get own last layer
+        self.need_for_own_last_layer = True#,self.prune_output_layer[0] # if relu is last activation, but we want to prune the output layer, we need to set this to true to get own last layer
         if self.cuda_active_training:
             self.model = Backbone(model_id=self.model_id, layers_needed=self.layers_needed, layer_cut=self.layer_cut, prune_output_layer=(False, []), prune_torch_pruning=self.prune_torch_pruning, prune_l1_norm=self.prune_l1_unstructured, exclude_relu=self.exclude_relu, sigmoid_in_last_layer = self.sigmoid_in_last_layer, need_for_own_last_layer=self.need_for_own_last_layer).cuda().eval() #, prune_l1_norm=self.prune_l1_unstructured
             self.dummy_input = torch.randn(1, 3, self.input_size, self.input_size).cuda()
@@ -177,26 +178,32 @@ class PatchCore(pl.LightningModule):
         self.output_shape = embeddings.shape # per picture
         self.idx_chosen = list(range(self.output_shape[1]))
         
-        for name, module in self.model.named_modules():
-            if isinstance(module, torch.nn.Conv2d):
-                if name != '2.block_2.final_3':  # Skip the last Conv2d layer
-                    # continue
-                    config_list.append({
-                        'op_types': ['Conv2d'],  # Prune only Conv2d layers
-                        'op_names': [name],  
-                        'sparsity': self.sparsity                    })
-                else:
-                    print('skipping')
-                    config_list.append({
-                        'op_names': [name],  # Prune the specific layer
-                        'exclude': True  # Exclude this layer for pruning
-                    })
+        if self.prune_structured_nni[0]:        
+            config_list = []
+            for name, module in self.model.named_modules():
+                if isinstance(module, torch.nn.Conv2d):
+                    if name != 'model.2.block_2.final_3':  # Skip the last Conv2d layer
+                        # continue
+                        config_list.append({
+                            'op_types': ['Conv2d'],  # Prune only Conv2d layers
+                            'op_names': [name],  
+                            'sparsity': self.sparsity
+                            })
+                    else:
+                        print('skipping')
+                        config_list.append({
+                            'op_names': [name],  # Prune the specific layer
+                            'exclude': True  # Exclude this layer for pruning
+                        })
+            
+            self.prune_structured_nni = (self.prune_structured_nni[0], config_list, self.prune_structured_nni[2])
         
         if self.iterative_pruning[0]:    
             # self.idx_chosen = list(range(128)) # TODO
             for k in range(self.iterative_pruning[1]): 
                 print(f'\nIteration of iterative Pruning and/or channel selection: {k+1} of {self.iterative_pruning[1]}\n')
                 if self.pretrain_for_channel_selection:
+                    print('\n1\n')
                     # print('Pretrain for channel selection ...')
                     _ = self.select_channels()#total_embeddings, pretrain=True) # also prunes the model's output layer
                 ### prune temp ###
@@ -205,11 +212,11 @@ class PatchCore(pl.LightningModule):
                 if self.prune_structured_nni[0]: 
                     self.model = prune_model_nni(self.model, self.prune_structured_nni[1], self.prune_structured_nni[2]) # whole net
                 ### prune temp ###
-
-        if self.prune_torch_pruning[0] and not self.iterative_pruning[0]:
-            self.model = prune_naive(self.model, self.prune_torch_pruning[1])
-        if self.prune_structured_nni[0]:
-            self.model = prune_model_nni(self.model, self.prune_structured_nni[1], self.prune_structured_nni[2])
+        else:# self.iterative_pruning[0]:
+            if self.prune_torch_pruning[0]:
+                self.model = prune_naive(self.model, self.prune_torch_pruning[1])
+            if self.prune_structured_nni[0]:
+                self.model = prune_model_nni(self.model, self.prune_structured_nni[1], self.prune_structured_nni[2])
         
         # print('Train model summary:')
         # summary(self.model, (1, 3, 224, 224), depth = 2, device = 'cuda' if self.cuda_active else 'cpu')
@@ -378,8 +385,13 @@ class PatchCore(pl.LightningModule):
         
         total_embeddings = self.select_channels(total_embeddings)#, pretrain=False)
         # Random projection
+        
+        self.pretrain_for_channel_selection = self.pretrain_for_channel_selection_copy#.copy()
         if self.quantize_model_with_nni:
             self.model = compress_model_nni(self.model)
+            
+        if self.quantize_model_pytorch:
+            self.model = quantize_model(self.model)
 
         if self.coreset_sampling_ratio == 1.0:
             self.embedding_coreset = total_embeddings
@@ -872,54 +884,96 @@ if __name__ == '__main__':
 
     print('start')
 
-    args = get_args()
+    # args = get_args()
     
-    model = PatchCore(args=args)
-    model.model_id = 'RN34'
-    model.layer_cut = True
-    model.layers_needed = [2]
-    model.cuda_active = True # should match trainer config
-    # model.prune_l1_unstructured = (True, 0.8)
-    # model.prune_torch_pruning = (True, 0.2)
-    # # model.prune_l1_structured_nni = (True, 0.2)
-    # model.sigmoid_in_last_layer = True
+    # model = PatchCore(args=args)
+    # model.model_id = 'RN34'
+    # model.layers_needed = [2]
+    # model.adapted_score_calc = True
+    # model.n_neighbors = 4
+    # model.n_next_patches = 16
+    # # model.reduce_via_std = True
+    # model.layer_cut = True
+    # # model.prune_output_layer = (True, [])
+    # # model.reduction_factor = 30
     
-    # model.reduce_via_std = True
-    # model.reduce_via_entropy_normed = False
-    # # model.faiss_standard = True
+
+    # run_id_prefix = 'prune_2206-dependency_aware_mode'
+    # pruning_factors = [0.4,0.1, 0.2, 0.3, 0.5, 0.6, 0.7, 0.8, 0.9]
+    # # pruning_factors = [0.03505]
+
+    # # for pf in pruning_factors:
+    # #     model.prune_l1_unstructured = (True, pf)
+    # #     model.group_id = run_id_prefix + 'pruned_by_' + str(pf)
+    # #     manager.run(model)
+    # # model.prune_l1_unstructured = (False, 0.0)    
+    # # model.group_id = run_id_prefix + 'non_pruned'
+    # # manager.run(model)
+    # # manager.get_summarization()
+
+    # # model.reduce_via_std = True
+    # # model.reduce_via_entropy_normed = True
+    # model.faiss_standard = True
     # # model.sigmoid_in_last_layer = True
 
-    # model.reduction_factor = 90
-    # model.prune_output_layer = (True, [])
-    # model.prune_structured_nni = (False, 0.05, 'L1')
-    # model.prune_torch_pruning = (True, 0.05)
-    # model.iterative_pruning = (True, 2)
-    # model.pretrain_for_channel_selection = True
-    # model.quantize_model_with_nni = False
-    # model.measure_inference = True
-    model.coreset_sampling_method = 'k_center_greedy'
-    # model.cuda_active_training = 
-    model.iterative_pruning = (True, 2)
-    model.pretrain_for_channel_selection = True
-    model.reduce_via_std = True
-    config_list = list() # will be properly defined in def.select_channels_core
+    # # model.reduction_factor = 80
+    # # model.prune_output_layer = (False, [])
+    # # model.reduction_factor = 90
+    # # model.reduce_via_std = True
+    # # model.pretrain_for_channel_selection = True
+    # # model.iterative_pruning = (True, 10)
+
+    # pruning_methods = ['L1', 'L2', 'FPGM']
+
+    # for pm in pruning_methods:
+    #     for pf in pruning_factors:
+    #         model.sparsity = pf
+    #         model.prune_structured_nni = (True, list(), pm)
+    # # model.model_id = 'RN34'
+    # model.layer_cut = True
+    # model.layers_needed = [2]
+    # model.cuda_active = True # should match trainer config
+    # # model.prune_l1_unstructured = (True, 0.8)
+    # # model.prune_torch_pruning = (True, 0.2)
+    # # # model.prune_l1_structured_nni = (True, 0.2)
+    # # model.sigmoid_in_last_layer = True
     
-    # has to be adjusted through the model args
-    model.prune_structured_nni = (True, config_list, 'L1')
-    model.prune_output_layer = (True, [])
-    # model.sigmoid_in_last_layer = True
-    model.exclude_relu = False
-    model.sparsity = 0.03
-    model.reduction_factor = 95
-    if args.phase == 'train':
-        trainer = pl.Trainer.from_argparse_args(args, default_root_dir=os.path.join(args.project_root_path, args.category), max_epochs=args.num_epochs, accelerator='gpu', devices=1, precision = '32') # allow gpu for training    
-        trainer.fit(model)
-        # os.environ["CUDA_VISIBLE_DEVICES"]=""
-        trainer = pl.Trainer.from_argparse_args(args, default_root_dir=os.path.join(args.project_root_path, args.category), max_epochs=args.num_epochs, accelerator='cpu', devices=1, precision='32') # but not for testing
-        trainer.test(model)
-    elif args.phase == 'test':
-        trainer = pl.Trainer.from_argparse_args(args, default_root_dir=os.path.join(args.project_root_path, args.category), max_epochs=args.num_epochs, gpus=0)
-        trainer.test(model)
+    # # model.reduce_via_std = True
+    # # model.reduce_via_entropy_normed = False
+    # # # model.faiss_standard = True
+    # # # model.sigmoid_in_last_layer = True
+
+    # # model.reduction_factor = 90
+    # # model.prune_output_layer = (True, [])
+    # # model.prune_structured_nni = (False, 0.05, 'L1')
+    # # model.prune_torch_pruning = (True, 0.05)
+    # # model.iterative_pruning = (True, 2)
+    # # model.pretrain_for_channel_selection = True
+    # # model.quantize_model_with_nni = False
+    # # model.measure_inference = True
+    # model.coreset_sampling_method = 'k_center_greedy'
+    # # model.cuda_active_training = 
+    # model.iterative_pruning = (True, 10)
+    # model.pretrain_for_channel_selection = True
+    # model.reduce_via_std = True
+    # config_list = list() # will be properly defined in def.select_channels_core
+    
+    # # has to be adjusted through the model args
+    # model.prune_structured_nni = (True, config_list, 'L1')
+    # model.prune_output_layer = (True, [])
+    # # model.sigmoid_in_last_layer = True<
+    # model.exclude_relu = False
+    # model.sparsity = 0.01
+    # model.reduction_factor = 99
+            # if args.phase == 'train':
+            #     trainer = pl.Trainer.from_argparse_args(args, default_root_dir=os.path.join(args.project_root_path, args.category), max_epochs=args.num_epochs, accelerator='gpu', devices=1, precision = '32') # allow gpu for training    
+            #     trainer.fit(model)
+            #     # os.environ["CUDA_VISIBLE_DEVICES"]=""
+            #     trainer = pl.Trainer.from_argparse_args(args, default_root_dir=os.path.join(args.project_root_path, args.category), max_epochs=args.num_epochs, accelerator='cpu', devices=1, precision='32') # but not for testing
+            #     trainer.test(model)
+            # elif args.phase == 'test':
+            #     trainer = pl.Trainer.from_argparse_args(args, default_root_dir=os.path.join(args.project_root_path, args.category), max_epochs=args.num_epochs, gpus=0)
+            #     trainer.test(model)
 
     
     # args = get_args()

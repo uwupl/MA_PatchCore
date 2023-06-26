@@ -1,5 +1,6 @@
 import torch
 import torch.nn.utils.prune as prune
+
 from torchvision import models
 import torch.nn as nn
 from typing import List, Tuple, OrderedDict
@@ -280,87 +281,7 @@ class Backbone(nn.Module):
         _ = self.model(x_t)
         return self.features
 
-def prune_model_l1_unstrucured(model, pruning_perc):
-    '''
-    Prune the model with the given pruning_perc. Decisions are made based on the L1 norm of the weights. 
-    '''
-    for name, module in model.named_modules():
-        if isinstance(module, nn.Conv2d):
-            prune.l1_unstructured(module, name='weight', amount=pruning_perc)
-            # prune.remove(module, 'weight')
 
-    return model
-
-def prune_model_l1_strucured(model, pruning_perc):
-    '''
-    Prune the model with the given pruning_perc. Decisions are made based on the L1 norm of the weights. 
-    '''
-    for name, module in model.named_modules():
-        if isinstance(module, nn.Conv2d):
-            prune.ln_structured(module, name='weight', amount=pruning_perc, n=1, dim=1)
-            # prune.remove(module, 'weight')
-
-    return model
-
-def prune_model_nni(model, config_list, method = 'L1', print_logs=False):
-    '''
-    Prune the model with the given pruning_perc. Decisions are made based on the L1 norm of the weights. Utilizes the nni pruning pipeline by microsoft.
-    '''
-    if method.__contains__('L1'):
-        from nni.compression.pytorch.pruning import L1NormPruner as Pruner #,L1NormPruner #L2NormPruner,
-    elif method.__contains__('L2'):
-        from nni.compression.pytorch.pruning import L2NormPruner as Pruner
-    elif method.__contains__('FPGM'):
-        from nni.compression.pytorch.pruning import FPGMPruner as Pruner
-    
-    # config_list = [{
-    #     'op_types': ['Conv2d'],
-    #     'total_sparsity': pruning_perc
-    # }, {
-    #     'exclude': True,
-    #     'op_names': ['OwnBasicblock.block_1.final_3']
-    # }]
-    
-    # pruner = L1NormPruner(model, config_list)
-    pruner = Pruner(model, config_list) #not working
-    # pruner = L2NormPruner(model, config_list)
-    
-    # compress the model and generate the masks
-    _, masks = pruner.compress()
-    # show the masks sparsity
-    if print_logs:
-        for name, mask in masks.items():
-            print(name, ' sparsity : ', '{:.2}'.format(mask['weight'].sum() / mask['weight'].numel()))
-        
-    # need to unwrap the model, if the model is wrapped before speedup
-    pruner._unwrap_model()
-
-    # speedup the model, for more information about speedup, please refer :doc:`pruning_speedup`.
-    from nni.compression.pytorch.speedup import ModelSpeedup
-
-    device = 'cuda' if next(model.parameters()).is_cuda else 'cpu'
-    
-    ModelSpeedup(model, torch.rand(1, 3, 224, 224).to(device), masks).speedup_model() # .to(device)
-    
-    for param in model.parameters():
-        param.requires_grad = False
-    
-    return model
-
-def compress_model_nni(model):#, pruning_perc, method = 'L1', print_logs=False):
-
-    from nni.algorithms.compression.pytorch.quantization import NaiveQuantizer as Compressor
-    # model = model.cuda()
-    print('model device: ', next(model.parameters()).device)
-    config_list = [{
-        'quant_types': ['weight'],
-        'quant_bits': {'weight': 8},
-        'op_types': ['Conv2d']
-    }]
-    
-    model = Compressor(model, config_list).compress()
-    
-    return model
 
 class OwnBottleneck(torch.nn.Module):
     def __init__(self, block_1, block_2, block_3, prune_output_layer, idx_selected, input_size, exclude_relu = False, sigmoid_in_last_layer=False):
@@ -371,6 +292,9 @@ class OwnBottleneck(torch.nn.Module):
         self.block_1 = torch.nn.Sequential(block_1)
         self.block_2 = torch.nn.Sequential(block_2)
         self.block_3 = torch.nn.Sequential(block_3)
+        self.quantize = True # TDOO
+        if self.quantize:
+            self.skip_add = torch.nn.quantized.FloatFunctional()
         if exclude_relu:
             self.output_activation = torch.nn.Identity()#inplace=True)
         elif sigmoid_in_last_layer:
@@ -403,7 +327,10 @@ class OwnBottleneck(torch.nn.Module):
         out = self.block_3(out)
         # identity = identity[:,self.idx_selected,...]
         
-        out += identity
+        if self.quantize:
+            out = self.skip_add.add(out, identity)
+        else:
+            out += identity
         out = self.output_activation(out)
                 
         return out
@@ -421,7 +348,11 @@ class OwnBasicblock(torch.nn.Module):
         # print(exclude_relu)
         # print(sigmoid_in_last_layer)
         # print(input_size)
-        print('HERE')
+        # print('HERE')
+        
+        self.quantize = True # TDOO
+        if self.quantize:
+            self.skip_add = torch.nn.quantized.FloatFunctional()
         self.block_1 = torch.nn.Sequential(block_1)
         self.block_2 = torch.nn.Sequential(block_2)
         if exclude_relu:
@@ -451,7 +382,13 @@ class OwnBasicblock(torch.nn.Module):
         out = self.block_2(out)
         # print('out shape: ', out.shape)
         # print('identity shape: ', identity.shape)
-        out += identity
+        # out += identity
+        
+        if self.quantize:
+            out = self.skip_add.add(out, identity)
+        else:
+            out += identity
+        out = self.output_activation(out)
         out = self.output_activation(out)
         return out
 
@@ -516,3 +453,114 @@ def prune_output_layer(model, idx_selected, max_index, input_size=(1,3,224,224))
         param.requires_grad = False
 
     return model
+
+
+def prune_model_l1_unstrucured(model, pruning_perc):
+    '''
+    Prune the model with the given pruning_perc. Decisions are made based on the L1 norm of the weights. 
+    '''
+    for name, module in model.named_modules():
+        if isinstance(module, nn.Conv2d):
+            prune.l1_unstructured(module, name='weight', amount=pruning_perc)
+            # prune.remove(module, 'weight')
+
+    return model
+
+def prune_model_l1_strucured(model, pruning_perc):
+    '''
+    Prune the model with the given pruning_perc. Decisions are made based on the L1 norm of the weights. 
+    '''
+    for name, module in model.named_modules():
+        if isinstance(module, nn.Conv2d):
+            prune.ln_structured(module, name='weight', amount=pruning_perc, n=1, dim=1)
+            # prune.remove(module, 'weight')
+
+    return model
+
+def prune_model_nni(model, config_list, method = 'L1', print_logs=False):
+    '''
+    Prune the model with the given pruning_perc. Decisions are made based on the L1 norm of the weights. Utilizes the nni pruning pipeline by microsoft.
+    '''
+    if method.__contains__('L1'):
+        from nni.compression.pytorch.pruning import L1NormPruner as Pruner #,L1NormPruner #L2NormPruner,
+    elif method.__contains__('L2'):
+        from nni.compression.pytorch.pruning import L2NormPruner as Pruner
+    elif method.__contains__('FPGM'):
+        from nni.compression.pytorch.pruning import FPGMPruner as Pruner
+    
+    # config_list = [{
+    #     'op_types': ['Conv2d'],
+    #     'total_sparsity': pruning_perc
+    # }, {
+    #     'exclude': True,
+    #     'op_names': ['OwnBasicblock.block_1.final_3']
+    # }]
+    
+    device = 'cuda' if next(model.parameters()).is_cuda else 'cpu'
+    dummy_input = torch.rand(1, 3, 224, 224).to(device)
+    mode = 'dependency_aware'#'normal'
+    
+    # pruner = L1NormPruner(model, config_list)
+    pruner = Pruner(model=model, config_list=config_list, mode=mode, dummy_input=dummy_input) #not working
+    # pruner = L2NormPruner(model, config_list)
+    
+    # compress the model and generate the masks
+    _, masks = pruner.compress()
+    # show the masks sparsity
+    if print_logs:
+        for name, mask in masks.items():
+            print(name, ' sparsity : ', '{:.2}'.format(mask['weight'].sum() / mask['weight'].numel()))
+        
+    # need to unwrap the model, if the model is wrapped before speedup
+    pruner._unwrap_model()
+
+    # speedup the model, for more information about speedup, please refer :doc:`pruning_speedup`.
+    from nni.compression.pytorch.speedup import ModelSpeedup
+
+    
+    
+    ModelSpeedup(model, dummy_input, masks).speedup_model() # .to(device)
+    
+    for param in model.parameters():
+        param.requires_grad = False
+    
+    return model
+
+def compress_model_nni(model):#, pruning_perc, method = 'L1', print_logs=False):
+
+    from nni.algorithms.compression.pytorch.quantization import QAT_Quantizer as Compressor
+    # model = model.cuda()
+    print('model device: ', next(model.parameters()).device)
+    config_list = [{
+        'quant_types': ['weight', 'output'],
+        'quant_bits': {'weight': 8, 'output': 8},
+        'op_types': ['Conv2d']
+    }]
+    # }, {
+    #     'quant_types': ['output'],
+    #     'quant_bits': {'output': 8},
+    #     'op_types': ['ReLU']
+    # }
+    # ]
+    
+    model = Compressor(model, config_list).compress()
+    
+    return model
+
+def quantize_model(model):
+    '''
+    quantize the model with the dynamic quantization method of pytorch.
+    '''
+    # imports
+    from torch.quantization import QuantStub, DeQuantStub, quantize_dynamic
+    # Define quantization and dequantization stubs
+    quant_stub = QuantStub()
+    dequant_stub = DeQuantStub()
+
+    # Apply quantization and dequantization stubs to the model
+    model = torch.nn.Sequential(quant_stub, model, dequant_stub)
+
+    # Quantize the model
+    quantized_model = quantize_dynamic(model, dtype=torch.qint8)
+
+    return quantized_model
