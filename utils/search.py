@@ -1,5 +1,5 @@
 import torch
-from utils import distance_matrix
+from utils.utils import distance_matrix
 
 class NN():
     def __init__(self, X=None, Y=None, p=2):

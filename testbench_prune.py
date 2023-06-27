@@ -199,9 +199,9 @@ if __name__ == '__main__':
     # model.reduction_factor = 30
     
 
-    run_id_prefix = 'prune_2006_iterative_pruning-'
+    run_id_prefix = 'prune_iterative_2306-'
     # pruning_factors = [0.4,0.1, 0.2, 0.3, 0.5, 0.6, 0.7, 0.8, 0.9]
-    pruning_factors = [0.03505]
+    # pruning_factors = [0.03505]
 
     # for pf in pruning_factors:
     #     model.prune_l1_unstructured = (True, pf)
@@ -215,26 +215,37 @@ if __name__ == '__main__':
     # model.reduce_via_std = True
     # model.reduce_via_entropy_normed = True
     model.faiss_standard = True
+    model.own_knn = False
     # model.sigmoid_in_last_layer = True
 
     # model.reduction_factor = 80
-    model.prune_output_layer = (False, [])
-    model.reduction_factor = 90
+    # model.prune_output_layer = (False, [])
+    # model.reduction_factor = 90
+    # model.reduce_via_std = True
+    # model.pretrain_for_channel_selection = True
+    # model.iterative_pruning = (True, 10)
+
+    pruning_methods = ['L2']#, 'L1', 'FPGM']
+    pruning_factors = [0.03] # 3% for each run
+    times_list = [5,1,2,3,4,6,7,8,9,10,11,12,13,14,15]
+    model.prune_output_layer = (True, [])
     model.reduce_via_std = True
+    model.reduction_factor = 98
+    model.iterative_pruning = (True, 0)
     model.pretrain_for_channel_selection = True
-    model.iterative_pruning = (True, 10)
-
-    pruning_methods = ['L2']#, 'L2', 'FPGM']
-
-    for pm in pruning_methods:
-        for pf in pruning_factors:
-            model.prune_structured_nni = (True, pf, pm) # TODO
-            model.group_id = run_id_prefix + f'iterative_pruning_(10)-pruned_by_0.4-L2-reduced_via_entropy_by_90'
-            manager.run(model)
-    model.prune_structured_nni = (True, 0.3, 'L2')
-    model.pretrain_for_channel_selection = False
-    model.iterative_pruning = (False, 0)    
-    model.group_id = run_id_prefix + 'no_iterative_pruning-pruned_by_0.4-L2-reduced_via_entropy_by_85'
-    model.reduction_factor = 85
+    for times in times_list:
+        for pm in pruning_methods:
+            for pf in pruning_factors:
+                model.iterative_pruning = (True, times)
+                model.sparsity = pf
+                model.prune_structured_nni = (True, list(), pm) # TODO
+                # model.group_id = run_id_prefix + f'iterative_pruning_(10)-pruned_by_0.4-L2-reduced_via_entropy_by_90'
+                model.group_id = run_id_prefix + f'pruned_{times}_times-{pm}'
+                model.pretrain_for_channel_selection = True # because this is set to False in the train_main after every run # TDOO
+                manager.run(model)
+    # model.prune_structured_nni = (True, 0.3, 'L2')
+    # model.pretrain_for_channel_selection = False   
+    # model.group_id = run_id_prefix + 'no_iterative_pruning-pruned_by_0.4-L2-reduced_via_entropy_by_85'
+    # model.reduction_factor = 85
     manager.run(model)
     print(manager.get_summarization())

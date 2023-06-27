@@ -196,15 +196,15 @@ if __name__ == '__main__':
     # model.reduce_via_std = True
     model.layer_cut = True
 
-    run_id_prefix = 'sampling_methods_1906-'
-
-    sampling_ratios = [0.001, 0.01, 0.1]
-    sampling_methods = ['k_center_greedy', 'random_selection']#, 'sparse_projection']
-
-    for ratio in sampling_ratios:
-        for method in sampling_methods:
-            model.coreset_sampling_ratio = ratio
-            model.coreset_sampling_method = method
-            model.group_id = f'{run_id_prefix}{method}-{ratio}'
-            manager.run(model)
+    run_id_prefix = 'quantized_with_pytorch_qint8-'
+    model.quantize_model_pytorch = True
+    model.group_id = f'{run_id_prefix}-quantized'
+    manager.this_run_id = run_id_prefix
+    manager.run(model)
+    
+    model.quantize_model_pytorch = False
+    model.group_id = f'{run_id_prefix}-not_quantized'
+    manager.this_run_id = run_id_prefix
+    manager.run(model)
+    
     print(manager.get_summarization())

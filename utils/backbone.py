@@ -341,20 +341,17 @@ class OwnBasicblock(torch.nn.Module):
         just pass OderedDicts, bottleneck like layer is created. For ResNet with Basicblocks. 
         '''
         super().__init__()
-        # print(block_1)
-        # print(block_2)
-        # print(prune_output_layer)
-        # print(idx_selected)
-        # print(exclude_relu)
-        # print(sigmoid_in_last_layer)
-        # print(input_size)
-        # print('HERE')
-        
-        self.quantize = True # TDOO
+        print('Basicblock')
+        print(block_1)
+        print(block_2)
+        self.quantize = True # TODO
         if self.quantize:
             self.skip_add = torch.nn.quantized.FloatFunctional()
+            block_2.popitem(last=True)
         self.block_1 = torch.nn.Sequential(block_1)
         self.block_2 = torch.nn.Sequential(block_2)
+        print(self.block_1)
+        print(self.block_2)
         if exclude_relu:
             self.output_activation = torch.nn.Identity()#inplace=True)
         elif sigmoid_in_last_layer:
@@ -378,18 +375,20 @@ class OwnBasicblock(torch.nn.Module):
             identity = x[:, self.idx_selected, ...]
         else:
             identity = x
-        out = self.block_1(x)
-        out = self.block_2(out)
+        out = self.block_1(x) # conv1 + bn1 + relu
+        out = self.block_2(out) # conv2 + bn2
         # print('out shape: ', out.shape)
         # print('identity shape: ', identity.shape)
         # out += identity
         
         if self.quantize:
             out = self.skip_add.add(out, identity)
+            print('1')
         else:
             out += identity
+            print('2')
         out = self.output_activation(out)
-        out = self.output_activation(out)
+        # out = self.output_activation(out)
         return out
 
 def prune_naive(model, pruning_perc):
@@ -488,14 +487,7 @@ def prune_model_nni(model, config_list, method = 'L1', print_logs=False):
     elif method.__contains__('FPGM'):
         from nni.compression.pytorch.pruning import FPGMPruner as Pruner
     
-    # config_list = [{
-    #     'op_types': ['Conv2d'],
-    #     'total_sparsity': pruning_perc
-    # }, {
-    #     'exclude': True,
-    #     'op_names': ['OwnBasicblock.block_1.final_3']
-    # }]
-    
+
     device = 'cuda' if next(model.parameters()).is_cuda else 'cpu'
     dummy_input = torch.rand(1, 3, 224, 224).to(device)
     mode = 'dependency_aware'#'normal'

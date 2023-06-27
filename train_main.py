@@ -1,10 +1,10 @@
 import os
-from backbone import Backbone, prune_naive, prune_model_nni, prune_output_layer, quantize_model, compress_model_nni
-from datasets import MVTecDataset
-from utils import min_max_norm, heatmap_on_image, cvt2heatmap, record_gpu, modified_kNN_score_calc, prep_dirs #  distance_matrix, softmax
-from pooling import adaptive_pooling
-from embedding import reshape_embedding, embedding_concat_frame
-from search import KNN, NN
+from utils.backbone import Backbone, prune_naive, prune_model_nni, prune_output_layer, quantize_model, compress_model_nni
+from utils.datasets import MVTecDataset
+from utils.utils import min_max_norm, heatmap_on_image, cvt2heatmap, record_gpu, modified_kNN_score_calc, prep_dirs #  distance_matrix, softmax
+from utils.pooling import adaptive_pooling
+from utils.embedding import reshape_embedding, embedding_concat_frame
+from utils.search import KNN, NN
 import numpy as np
 import pandas as pd
 from PIL import Image
@@ -29,6 +29,46 @@ from anomalib.models.components.sampling import k_center_greedy
 from torchinfo import summary
 
 class PatchCore(pl.LightningModule):
+    '''
+    __init__:
+        - initialize all parameters
+    fit:
+        on_train_start:
+            - set paths
+            - load initial model based on args
+            - determine intial output size
+            - pruning of model
+            - iterative pruning
+                - channel selection (optional)
+                - pruning (optional)
+            - quantization of model (TODO)
+        training_step:
+            - forward pass: feature extraction --> embedding
+            - save as numpy array which is attribute of class
+        training_epoch_end:
+            - select channels (optional)
+            - quantize model (optional, maybe not clever at this point)
+            - sampling of coreset
+            - choose search engine
+            - save coreset
+            - save model
+    test:
+        on_test_start:
+            - load model
+            - load coreset
+            - initialize search engine
+        test_step: (self.only_img_lvl = True)
+            - devided into subfunctions: test_step_core 
+                feature_extraction
+                feature_embedding
+                calc_score_patches
+                calc_img_score
+            - measure inference time utilizing time.perf_counter() (optional)
+            - save results (score (float) for each img)
+        test_epoch_end:
+            - determines img_auc (and pxl_auc if self.only_img_lvl = False) using sklearn.metrics.roc_auc_score
+            - creates pandas dataframe with results and all settings
+    '''
     def __init__(self, args):
         super(PatchCore, self).__init__()
         
@@ -91,22 +131,22 @@ class PatchCore(pl.LightningModule):
         self.exclude_relu = False
         self.sigmoid_in_last_layer = False
 
-        self.criterion = torch.nn.MSELoss(reduction='sum')
+        self.criterion = torch.nn.MSELoss(reduction='sum') # not really necessary, TODO: remove
 
         self.init_results_list()
-
+        # prepare transformations of data --> potential? TODO --> eher Nein
         self.data_transforms = transforms.Compose([
                         transforms.Resize((self.load_size, self.load_size), Image.ANTIALIAS),
                         transforms.ToTensor(),
                         transforms.CenterCrop(self.input_size),
                         transforms.Normalize(mean=[0.485, 0.456, 0.406],
-                                            std=[0.229, 0.224, 0.225])]) # from imagenet
+                                            std=[0.229, 0.224, 0.225])]) # from imagenet  # for each category calculate mean and std TODO
+        
         self.gt_transforms = transforms.Compose([
                         transforms.Resize((self.load_size, self.load_size)),
                         transforms.ToTensor(),
                         transforms.CenterCrop(self.input_size)])
-        self.inv_normalize = transforms.Normalize(mean=[-0.485/0.229, -0.456/0.224, -0.406/0.255], std=[1/0.229, 1/0.224, 1/0.255])
-        
+        self.inv_normalize = transforms.Normalize(mean=[-0.485/0.229, -0.456/0.224, -0.406/0.255], std=[1/0.229, 1/0.224, 1/0.255]) # aus imagenet
         if self.quantization:
             self = self.half()
 
@@ -121,10 +161,14 @@ class PatchCore(pl.LightningModule):
         self.features = []
 
     def forward(self, x_t):
+        '''
+        extract features from model
+        '''
         self.init_features()
         _ = self.model(x_t)
         return self.features
-
+    
+    # not used as long as self.only_img_lvl is True
     def save_anomaly_map(self, anomaly_map, input_img, gt_img, file_name, x_type):
         if anomaly_map.shape != input_img.shape:
             anomaly_map = cv2.resize(anomaly_map, (input_img.shape[0], input_img.shape[1]))
@@ -142,11 +186,19 @@ class PatchCore(pl.LightningModule):
         cv2.imwrite(os.path.join(self.sample_path, f'{x_type}_{file_name}_gt.jpg'), gt_img)
 
     def train_dataloader(self):
+        '''
+        load training data
+        uses attributes to determine which dataset to load
+        '''
         image_datasets = MVTecDataset(root=os.path.join(self.dataset_path,self.category), transform=self.data_transforms, gt_transform=self.gt_transforms, phase='train', half=self.quantization)
         train_loader = DataLoader(image_datasets, batch_size=self.batch_size, shuffle=False, num_workers=self.num_workers)
         return train_loader
 
     def test_dataloader(self):
+        '''
+        load test data
+        uses attributes to determine which dataset to load
+        '''
         test_datasets = MVTecDataset(root=os.path.join(self.dataset_path,self.category), transform=self.data_transforms, gt_transform=self.gt_transforms, phase='test', half=self.quantization)
         test_loader = DataLoader(test_datasets, batch_size=1, shuffle=False, num_workers=self.num_workers)
         return test_loader
@@ -155,6 +207,9 @@ class PatchCore(pl.LightningModule):
         return None
 
     def on_train_start(self):
+        '''
+        TODO
+        '''
         # initialize paths
         self.log_path = os.path.join(os.path.dirname(__file__), "results",f"{self.group_id}", "csv")
         if not os.path.exists(self.log_path):
@@ -164,7 +219,7 @@ class PatchCore(pl.LightningModule):
         self.embedding_dir_path, self.sample_path, self.source_code_save_path = prep_dirs(self.logger.log_dir, self.category)
         
         # get backbone
-        self.need_for_own_last_layer = True#,self.prune_output_layer[0] # if relu is last activation, but we want to prune the output layer, we need to set this to true to get own last layer
+        self.need_for_own_last_layer = True # TODO #,self.prune_output_layer[0] # if relu is last activation, but we want to prune the output layer, we need to set this to true to get own last layer
         if self.cuda_active_training:
             self.model = Backbone(model_id=self.model_id, layers_needed=self.layers_needed, layer_cut=self.layer_cut, prune_output_layer=(False, []), prune_torch_pruning=self.prune_torch_pruning, prune_l1_norm=self.prune_l1_unstructured, exclude_relu=self.exclude_relu, sigmoid_in_last_layer = self.sigmoid_in_last_layer, need_for_own_last_layer=self.need_for_own_last_layer).cuda().eval() #, prune_l1_norm=self.prune_l1_unstructured
             self.dummy_input = torch.randn(1, 3, self.input_size, self.input_size).cuda()
@@ -178,11 +233,12 @@ class PatchCore(pl.LightningModule):
         self.output_shape = embeddings.shape # per picture
         self.idx_chosen = list(range(self.output_shape[1]))
         
-        if self.prune_structured_nni[0]:        
+        if self.prune_structured_nni[0]: #(bool, config_list, method)  
             config_list = []
             for name, module in self.model.named_modules():
                 if isinstance(module, torch.nn.Conv2d):
                     if name != 'model.2.block_2.final_3':  # Skip the last Conv2d layer
+                    # if name != '4.2.45'
                         # continue
                         config_list.append({
                             'op_types': ['Conv2d'],  # Prune only Conv2d layers
@@ -199,7 +255,6 @@ class PatchCore(pl.LightningModule):
             self.prune_structured_nni = (self.prune_structured_nni[0], config_list, self.prune_structured_nni[2])
         
         if self.iterative_pruning[0]:    
-            # self.idx_chosen = list(range(128)) # TODO
             for k in range(self.iterative_pruning[1]): 
                 print(f'\nIteration of iterative Pruning and/or channel selection: {k+1} of {self.iterative_pruning[1]}\n')
                 if self.pretrain_for_channel_selection:
@@ -280,38 +335,46 @@ class PatchCore(pl.LightningModule):
             self.embedding_np = np.append(self.embedding_np, reshape_embedding(np.array(embedding)), axis=0)#.extend(reshape_embedding(np.array(embedding)))
             
     def select_channels_core(self, total_embeddings):
+        '''
+        Select channels based on chosen scheme. If scheme is 'std', the channels with the highest std are chosen.
+        Also prune of models output channels is done here
+        '''
         if self.reduce_via_std:
             percentile_std = 100-self.reduction_factor 
             this_idx_chosen = set(np.argwhere(np.std(total_embeddings, axis=0)>np.percentile(np.std(total_embeddings,axis=0), percentile_std))[:,0])
             idx_chosen_set = this_idx_chosen#set(self.idx_chosen).intersection(this_idx_chosen)
             self.idx_chosen = np.array(list(idx_chosen_set), dtype=np.int32)
-
-            # self.idx_chosen = np.append(self.idx_chosen, np.argwhere(np.std(total_embeddings, axis=0)>np.percentile(np.std(total_embeddings,axis=0), percentile_std))[:,0])
-            # total_embeddings = np.take(total_embeddings, self.idx_chosen, axis=1)#total_embeddings[:,self.idx_with_high_std] # c contigous
-        if self.normalize:
+        
+        if self.normalize: # in order to emphasize the importance of the std, we normalize the embeddings, to achieve a more uniform importance of each channel
             self.mean = np.mean(total_embeddings, axis=0)
             self.std = np.std(total_embeddings, axis=0)
             self.std = self.std + 5e-2*np.mean(self.std) # add 5% of mean to std to avoid division by zero
             total_embeddings = (total_embeddings-self.mean)/self.std
             # total_embeddings[:,self.std<1e-15] = 0.0
-        if self.reduce_via_entropy:
+        
+        if self.reduce_via_entropy: # this is technically not entropy, but the same idea
             percentile_entropy = 100-self.reduction_factor
             total_embeddings_copy = total_embeddings.copy()
             total_embeddings_copy[total_embeddings_copy<1e-15] = 1e-15
             entropy = -np.sum(total_embeddings_copy*np.log2(total_embeddings_copy), axis=0)#.shape
-            # self.idx_chosen = np.argwhere(entropy>np.percentile(entropy, percentile_entropy))[:,0]
-            self.idx_chosen = np.append(self.idx_chosen, np.argwhere(np.std(total_embeddings, axis=0)>np.percentile(np.std(total_embeddings,axis=0), percentile_entropy))[:,0])
+            idx_chosen_set = set(np.argwhere(entropy>np.percentile(entropy, percentile_entropy))[:,0])
+            # self.idx_chosen = np.append(self.idx_chosen, np.argwhere(np.std(total_embeddings, axis=0)>np.percentile(np.std(total_embeddings,axis=0), percentile_entropy))[:,0])
             # total_embeddings = np.take(total_embeddings, self.idx_chosen, axis=1)
-        if self.reduce_via_entropy_normed:
+            idx_chosen_set = idx_chosen_set.intersection(set(self.idx_chosen))
+        
+        if self.reduce_via_entropy_normed: # here we norm each channel to 1 and then compute the entropy
             percentile_entropy = 100-self.reduction_factor
             total_embeddings_copy = total_embeddings.copy()
             total_embeddings_copy[total_embeddings_copy<1e-15] = 1e-15
             normed_embeddings = total_embeddings_copy/total_embeddings_copy.sum(axis=1, keepdims=1)
             entropy = -np.sum(normed_embeddings*np.log2(normed_embeddings), axis=0)#.shape
+            idx_chosen_set = set(np.argwhere(entropy>np.percentile(entropy, percentile_entropy))[:,0])
             # self.idx_chosen = np.argwhere(entropy>np.percentile(entropy, percentile_entropy))[:,0]
-            self.idx_chosen = np.append(self.idx_chosen, np.argwhere(np.std(total_embeddings, axis=0)>np.percentile(np.std(total_embeddings,axis=0), percentile_entropy))[:,0])
+            # self.idx_chosen = np.append(self.idx_chosen, np.argwhere(np.std(total_embeddings, axis=0)>np.percentile(np.std(total_embeddings,axis=0), percentile_entropy))[:,0])
             # total_embeddings = np.take(total_embeddings, self.idx_chosen, axis=1)
-        if self.weight_by_entropy: # 
+            idx_chosen_set = idx_chosen_set.intersection(set(self.idx_chosen))
+        
+        if self.weight_by_entropy: # since we saw TODO
             total_embeddings_copy = total_embeddings.copy()
             total_embeddings_copy[total_embeddings_copy<1e-15] = 1e-15
             normed_embeddings = total_embeddings_copy/total_embeddings_copy.sum(axis=1, keepdims=1)
@@ -319,6 +382,7 @@ class PatchCore(pl.LightningModule):
             # self.weights = softmax(entropy) * total_embeddings.shape[1]
             self.weights = entropy / np.sum(entropy) * total_embeddings.shape[1]
             total_embeddings = np.multiply(total_embeddings, self.weights)
+        
         if (self.reduce_via_entropy or self.reduce_via_entropy_normed) and self.normalize and not self.reduce_via_std:
             # self.idx_chosen = np.unique(self.idx_chosen)
             self.std = np.take(self.std, self.idx_chosen)#, axis=0)
@@ -327,7 +391,7 @@ class PatchCore(pl.LightningModule):
             # self.idx_chosen = np.unique(self.idx_chosen)
             print('Number of channels chosen: ', len(self.idx_chosen))
             total_embeddings = np.take(total_embeddings, self.idx_chosen, axis=1)
-        if self.save_embeddings:
+        if self.save_embeddings: # just for debugging
             file_name_embeddings = input('file name for embeddings:\n')
             np.save(file_name_embeddings + '.npy', total_embeddings)
         if (self.prune_output_layer[0] and (self.reduce_via_entropy or self.reduce_via_std or self.reduce_via_entropy_normed)):# or self.prune_l1_unstructured:
@@ -344,7 +408,7 @@ class PatchCore(pl.LightningModule):
             #     self.model = Backbone(model_id=self.model_id, layers_needed=self.layers_needed, layer_cut=self.layer_cut, prune_output_layer=self.prune_output_layer, prune_l1_norm=self.prune_l1_unstructured, exclude_relu = self.exclude_relu, sigmoid_in_last_layer = self.sigmoid_in_last_layer).cuda()
             # else:
             #     self.model = Backbone(model_id=self.model_id, layers_needed=self.layers_needed, layer_cut=self.layer_cut, prune_output_layer=self.prune_output_layer, prune_l1_norm=self.prune_l1_unstructured, exclude_relu = self.exclude_relu, sigmoid_in_last_layer = self.sigmoid_in_last_layer)
-        print('Model output shape: ', self.model(torch.randn(1,3,224,224).cuda())[0].shape)
+        print('Model output shape: ', self.model(torch.randn(1,3,224,224).cpu())[0].shape)
         print('Number of channels chosen: ', len(self.idx_chosen))
         print('shape of total_embeddings: ', total_embeddings.shape)
         return total_embeddings
@@ -367,7 +431,7 @@ class PatchCore(pl.LightningModule):
         return total_embeddings
     
     def training_epoch_end(self, outputs):
-        if self.save_features:
+        if self.save_features: # just for debugging
             file_name_features = input('file name for features:\n')
             # feature_save = np.array([])
             for k1, el in enumerate(self.features_to_store):
@@ -884,114 +948,25 @@ if __name__ == '__main__':
 
     print('start')
 
-    # args = get_args()
+    args = get_args() # TODO remove
     
-    # model = PatchCore(args=args)
-    # model.model_id = 'RN34'
-    # model.layers_needed = [2]
-    # model.adapted_score_calc = True
-    # model.n_neighbors = 4
-    # model.n_next_patches = 16
-    # # model.reduce_via_std = True
-    # model.layer_cut = True
-    # # model.prune_output_layer = (True, [])
-    # # model.reduction_factor = 30
-    
-
-    # run_id_prefix = 'prune_2206-dependency_aware_mode'
-    # pruning_factors = [0.4,0.1, 0.2, 0.3, 0.5, 0.6, 0.7, 0.8, 0.9]
-    # # pruning_factors = [0.03505]
-
-    # # for pf in pruning_factors:
-    # #     model.prune_l1_unstructured = (True, pf)
-    # #     model.group_id = run_id_prefix + 'pruned_by_' + str(pf)
-    # #     manager.run(model)
-    # # model.prune_l1_unstructured = (False, 0.0)    
-    # # model.group_id = run_id_prefix + 'non_pruned'
-    # # manager.run(model)
-    # # manager.get_summarization()
-
-    # # model.reduce_via_std = True
-    # # model.reduce_via_entropy_normed = True
-    # model.faiss_standard = True
-    # # model.sigmoid_in_last_layer = True
-
-    # # model.reduction_factor = 80
-    # # model.prune_output_layer = (False, [])
-    # # model.reduction_factor = 90
-    # # model.reduce_via_std = True
-    # # model.pretrain_for_channel_selection = True
-    # # model.iterative_pruning = (True, 10)
-
-    # pruning_methods = ['L1', 'L2', 'FPGM']
-
-    # for pm in pruning_methods:
-    #     for pf in pruning_factors:
-    #         model.sparsity = pf
-    #         model.prune_structured_nni = (True, list(), pm)
-    # # model.model_id = 'RN34'
-    # model.layer_cut = True
-    # model.layers_needed = [2]
-    # model.cuda_active = True # should match trainer config
-    # # model.prune_l1_unstructured = (True, 0.8)
-    # # model.prune_torch_pruning = (True, 0.2)
-    # # # model.prune_l1_structured_nni = (True, 0.2)
-    # # model.sigmoid_in_last_layer = True
-    
-    # # model.reduce_via_std = True
-    # # model.reduce_via_entropy_normed = False
-    # # # model.faiss_standard = True
-    # # # model.sigmoid_in_last_layer = True
-
-    # # model.reduction_factor = 90
-    # # model.prune_output_layer = (True, [])
-    # # model.prune_structured_nni = (False, 0.05, 'L1')
-    # # model.prune_torch_pruning = (True, 0.05)
-    # # model.iterative_pruning = (True, 2)
-    # # model.pretrain_for_channel_selection = True
-    # # model.quantize_model_with_nni = False
-    # # model.measure_inference = True
-    # model.coreset_sampling_method = 'k_center_greedy'
-    # # model.cuda_active_training = 
-    # model.iterative_pruning = (True, 10)
-    # model.pretrain_for_channel_selection = True
-    # model.reduce_via_std = True
-    # config_list = list() # will be properly defined in def.select_channels_core
-    
-    # # has to be adjusted through the model args
-    # model.prune_structured_nni = (True, config_list, 'L1')
-    # model.prune_output_layer = (True, [])
-    # # model.sigmoid_in_last_layer = True<
-    # model.exclude_relu = False
-    # model.sparsity = 0.01
-    # model.reduction_factor = 99
-            # if args.phase == 'train':
-            #     trainer = pl.Trainer.from_argparse_args(args, default_root_dir=os.path.join(args.project_root_path, args.category), max_epochs=args.num_epochs, accelerator='gpu', devices=1, precision = '32') # allow gpu for training    
-            #     trainer.fit(model)
-            #     # os.environ["CUDA_VISIBLE_DEVICES"]=""
-            #     trainer = pl.Trainer.from_argparse_args(args, default_root_dir=os.path.join(args.project_root_path, args.category), max_epochs=args.num_epochs, accelerator='cpu', devices=1, precision='32') # but not for testing
-            #     trainer.test(model)
-            # elif args.phase == 'test':
-            #     trainer = pl.Trainer.from_argparse_args(args, default_root_dir=os.path.join(args.project_root_path, args.category), max_epochs=args.num_epochs, gpus=0)
-            #     trainer.test(model)
-
-    
-    # args = get_args()
-    
-    # model = PatchCore(args=args)
-    # # temp
-    # # model.model_id = 'RN34'
-    # # model.layers_needed = [2]
-    # # model.layer_cut = True
-    # # model.cuda_active = True
-    # # model.cuda_active_training = True
-    # # model.prune_l1_norm = (True, 0.5)
-    # if args.phase == 'train':
-    #     trainer = pl.Trainer.from_argparse_args(args, default_root_dir=os.path.join(args.project_root_path, args.category), max_epochs=args.num_epochs, accelerator='gpu', devices=1, precision = '32') # allow gpu for training    
-    #     trainer.fit(model)
-    #     trainer = pl.Trainer.from_argparse_args(args, default_root_dir=os.path.join(args.project_root_path, args.category), max_epochs=args.num_epochs, accelerator='gpu', devices=1, precision='32') # but not for testing
-    #     trainer.test(model)
-    # elif args.phase == 'test':
-    #     trainer = pl.Trainer.from_argparse_args(args, default_root_dir=os.path.join(args.project_root_path, args.category), max_epochs=args.num_epochs, gpus=0)
-    #     trainer.test(model)
+    model = PatchCore(args=args)
+    model.model_id = 'RN34'
+    model.layers_needed = [2]
+    model.adapted_score_calc = True
+    model.n_neighbors = 4
+    model.n_next_patches = 16
+    model.cuda_active = False
+    model.cuda_active_training = False
+    # model.need_for_own_last_layer
+    os.environ['CUDA_VISIBLE_DEVICES'] = '-1'
+    if args.phase == 'train':
+        trainer = pl.Trainer.from_argparse_args(args, default_root_dir=os.path.join(args.project_root_path, args.category), max_epochs=args.num_epochs, accelerator='cpu', devices=1, precision = '32') # allow gpu for training    
+        trainer.fit(model)
+        os.environ['CUDA_VISIBLE_DEVICES'] = '-1'
+        trainer = pl.Trainer.from_argparse_args(args, default_root_dir=os.path.join(args.project_root_path, args.category), max_epochs=args.num_epochs, accelerator='cpu', devices=1, precision='32') # but not for testing
+        trainer.test(model)
+    elif args.phase == 'test':
+        trainer = pl.Trainer.from_argparse_args(args, default_root_dir=os.path.join(args.project_root_path, args.category), max_epochs=args.num_epochs, gpus=0)
+        trainer.test(model)
 
