@@ -2,6 +2,7 @@ import torch
 import torch.nn.utils.prune as prune
 
 from torchvision import models
+from utils.own_resnet import wide_resnet50_2, Wide_ResNet50_2_Weights, wide_resnet101_2, Wide_ResNet101_2_Weights, ResNet34_Weights, resnet34, ResNet50_Weights, resnet50
 import torch.nn as nn
 from typing import List, Tuple, OrderedDict
 import torch_pruning as tp
@@ -32,24 +33,24 @@ class Backbone(nn.Module):
         self.init_features()
         
         if self.model_id.__contains__('WRN50'):
-            weights = models.Wide_ResNet50_2_Weights.DEFAULT
-            self.model =  models.wide_resnet50_2(weights=weights)
+            weights = Wide_ResNet50_2_Weights.DEFAULT
+            self.model =  wide_resnet50_2(weights=weights)
             self.procedure_resnet()    
         elif self.model_id.__contains__('WRN101'):
-            weights = models.Wide_ResNet101_2_Weights.DEFAULT
-            self.model =  models.wide_resnet101_2(weights=weights)
+            weights = Wide_ResNet101_2_Weights.DEFAULT
+            self.model = wide_resnet101_2(weights=weights)
             self.procedure_resnet()
         elif self.model_id.__contains__('RN18'):
-            weights = models.ResNet18_Weights.DEFAULT
-            self.model = models.resnet18(weights=weights)
+            weights = ResNet18_Weights.DEFAULT
+            self.model = resnet18(weights=weights)
             self.procedure_resnet()
         elif self.model_id.__contains__('RN34'):
-            weights = models.ResNet34_Weights.DEFAULT
-            self.model = models.resnet34(weights=weights)
+            weights = ResNet34_Weights.DEFAULT
+            self.model = resnet34(weights=weights)
             self.procedure_resnet()
         elif self.model_id.__contains__('RN50'):
-            weights = models.ResNet50_Weights.DEFAULT
-            self.model = models.resnet50(weights=weights)
+            weights = ResNet50_Weights.DEFAULT
+            self.model = resnet50(weights=weights)
             self.procedure_resnet()
             
         elif self.model_id.__contains__('CX_XS'):

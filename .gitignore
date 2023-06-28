@@ -136,3 +136,12 @@ dmypy.json
 *.ipynb
 *.pt
 *.npy
+*.yml
+*.zip
+
+
+
+/old_scripts/*
+/old_notebooks/*
+/gina/*
+/luisa/*

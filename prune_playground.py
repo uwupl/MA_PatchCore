@@ -3,7 +3,7 @@ import torch
 import torch_pruning as tp
 import numpy as np
 from torchinfo  import summary
-from utils.backbone import Backbone, OwnBasicblock, prune_model_nni, prune_output_layer, compress_model_nni
+from utils.backbone import Backbone#, OwnBasicblock, prune_model_nni, prune_output_layer, compress_model_nni
 from nni.compression.pytorch.pruning import L2NormPruner as Pruner
 from utils.datasets import MVTecDataset
 from torch.utils.data import DataLoader

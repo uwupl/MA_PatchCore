@@ -112,6 +112,7 @@ class PatchCore(pl.LightningModule):
         self.iterative_pruning = (False, 0)
         self.quantize_model_with_nni = False
         self.quantize_model_pytorch = False
+        model.quantize_qint8 = True
         # self.idx_chosen = np.array([], dtype=np.int32)
         self.idx_chosen = np.arange(128,dtype=np.int32) # TODO
         self.weight_by_entropy = False
@@ -221,10 +222,10 @@ class PatchCore(pl.LightningModule):
         # get backbone
         self.need_for_own_last_layer = True # TODO #,self.prune_output_layer[0] # if relu is last activation, but we want to prune the output layer, we need to set this to true to get own last layer
         if self.cuda_active_training:
-            self.model = Backbone(model_id=self.model_id, layers_needed=self.layers_needed, layer_cut=self.layer_cut, prune_output_layer=(False, []), prune_torch_pruning=self.prune_torch_pruning, prune_l1_norm=self.prune_l1_unstructured, exclude_relu=self.exclude_relu, sigmoid_in_last_layer = self.sigmoid_in_last_layer, need_for_own_last_layer=self.need_for_own_last_layer).cuda().eval() #, prune_l1_norm=self.prune_l1_unstructured
+            self.model = Backbone(model_id=self.model_id, layers_needed=self.layers_needed, layer_cut=self.layer_cut, prune_output_layer=(False, []), prune_torch_pruning=self.prune_torch_pruning, prune_l1_norm=self.prune_l1_unstructured, exclude_relu=self.exclude_relu, sigmoid_in_last_layer = self.sigmoid_in_last_layer, need_for_own_last_layer=self.need_for_own_last_layer, quantize_qint8=self.quantize_qint8).cuda().eval() #, prune_l1_norm=self.prune_l1_unstructured
             self.dummy_input = torch.randn(1, 3, self.input_size, self.input_size).cuda()
         else:
-            self.model = Backbone(model_id=self.model_id, layers_needed=self.layers_needed, layer_cut=self.layer_cut, prune_output_layer=(False, []), prune_torch_pruning=self.prune_torch_pruning, prune_l1_norm=self.prune_l1_unstructured, exclude_relu=self.exclude_relu, sigmoid_in_last_layer = self.sigmoid_in_last_layer, need_for_own_last_layer=self.need_for_own_last_layer).eval() # prune_l1_norm=self.prune_l1_unstructured,
+            self.model = Backbone(model_id=self.model_id, layers_needed=self.layers_needed, layer_cut=self.layer_cut, prune_output_layer=(False, []), prune_torch_pruning=self.prune_torch_pruning, prune_l1_norm=self.prune_l1_unstructured, exclude_relu=self.exclude_relu, sigmoid_in_last_layer = self.sigmoid_in_last_layer, need_for_own_last_layer=self.need_for_own_last_layer, quantize_qint8=self.quantize_qint8).eval() # prune_l1_norm=self.prune_l1_unstructured,
             self.dummy_input = torch.randn(1, 3, self.input_size, self.input_size)
         # determine output shape of model
 
@@ -404,10 +405,6 @@ class PatchCore(pl.LightningModule):
             print('self.prune_output_layer: ', self.prune_output_layer)
             self.model = prune_output_layer(self.model, self.idx_chosen, self.output_shape[1])
             
-            # if self.cuda_active_training:
-            #     self.model = Backbone(model_id=self.model_id, layers_needed=self.layers_needed, layer_cut=self.layer_cut, prune_output_layer=self.prune_output_layer, prune_l1_norm=self.prune_l1_unstructured, exclude_relu = self.exclude_relu, sigmoid_in_last_layer = self.sigmoid_in_last_layer).cuda()
-            # else:
-            #     self.model = Backbone(model_id=self.model_id, layers_needed=self.layers_needed, layer_cut=self.layer_cut, prune_output_layer=self.prune_output_layer, prune_l1_norm=self.prune_l1_unstructured, exclude_relu = self.exclude_relu, sigmoid_in_last_layer = self.sigmoid_in_last_layer)
         print('Model output shape: ', self.model(torch.randn(1,3,224,224).cpu())[0].shape)
         print('Number of channels chosen: ', len(self.idx_chosen))
         print('shape of total_embeddings: ', total_embeddings.shape)
