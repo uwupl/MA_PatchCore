@@ -2,7 +2,19 @@ import torch
 import torch.nn.utils.prune as prune
 
 from torchvision import models
-from utils.own_resnet import wide_resnet50_2, Wide_ResNet50_2_Weights, wide_resnet101_2, Wide_ResNet101_2_Weights, ResNet34_Weights, resnet34, ResNet50_Weights, resnet50
+
+if __name__ == '__main__':
+    from own_resnet import wide_resnet50_2, Wide_ResNet50_2_Weights, wide_resnet101_2, Wide_ResNet101_2_Weights, ResNet34_Weights, resnet34, ResNet50_Weights, resnet50, ResNet18_Weights, resnet18
+else:
+    from .own_resnet import wide_resnet50_2, Wide_ResNet50_2_Weights, wide_resnet101_2, Wide_ResNet101_2_Weights, ResNet34_Weights, resnet34, ResNet50_Weights, resnet50, ResNet18_Weights, resnet18
+# import torch.nn as nn
+if False:
+    import torchy.nn as nn
+    from torchy.utils.data import DataLoader
+else:
+    from torch import nn
+    from torch.utils.data import DataLoader
+
 import torch.nn as nn
 from typing import List, Tuple, OrderedDict
 import torch_pruning as tp
@@ -19,6 +31,8 @@ class Backbone(nn.Module):
         exclude_relu: bool = False,
         sigmoid_in_last_layer: bool = False,
         need_for_own_last_layer: bool = False,
+        quantize_qint8_prepared: bool = False,
+        hooks_needed: bool = True,
     ) -> None:
         super().__init__()
         self.model_id = model_id
@@ -30,30 +44,55 @@ class Backbone(nn.Module):
         self.exclude_relu = exclude_relu
         self.sigmoid_in_last_layer = sigmoid_in_last_layer
         self.need_for_own_last_layer = sigmoid_in_last_layer or exclude_relu or prune_output_layer[0] or need_for_own_last_layer
-        self.init_features()
+        self.quantize_qint8 = quantize_qint8_prepared
+        self.hooks_needed = hooks_needed
+        if self.hooks_needed:
+            self.init_features()
         
-        if self.model_id.__contains__('WRN50'):
-            weights = Wide_ResNet50_2_Weights.DEFAULT
-            self.model =  wide_resnet50_2(weights=weights)
-            self.procedure_resnet()    
-        elif self.model_id.__contains__('WRN101'):
-            weights = Wide_ResNet101_2_Weights.DEFAULT
-            self.model = wide_resnet101_2(weights=weights)
-            self.procedure_resnet()
-        elif self.model_id.__contains__('RN18'):
-            weights = ResNet18_Weights.DEFAULT
-            self.model = resnet18(weights=weights)
-            self.procedure_resnet()
-        elif self.model_id.__contains__('RN34'):
-            weights = ResNet34_Weights.DEFAULT
-            self.model = resnet34(weights=weights)
-            self.procedure_resnet()
-        elif self.model_id.__contains__('RN50'):
-            weights = ResNet50_Weights.DEFAULT
-            self.model = resnet50(weights=weights)
-            self.procedure_resnet()
-            
-        elif self.model_id.__contains__('CX_XS'):
+        if self.quantize_qint8:
+            if self.model_id.__contains__('WRN50'):
+                weights = Wide_ResNet50_2_Weights.DEFAULT
+                self.model =  wide_resnet50_2(weights=weights)
+                self.procedure_resnet()    
+            elif self.model_id.__contains__('WRN101'):
+                weights = Wide_ResNet101_2_Weights.DEFAULT
+                self.model = wide_resnet101_2(weights=weights)
+                self.procedure_resnet()
+            elif self.model_id.__contains__('RN18'):
+                weights = ResNet18_Weights.DEFAULT
+                self.model = resnet18(weights=weights)
+                self.procedure_resnet()
+            elif self.model_id.__contains__('RN34'):
+                weights = ResNet34_Weights.DEFAULT
+                self.model = resnet34(weights=weights)
+                self.procedure_resnet()
+            elif self.model_id.__contains__('RN50'):
+                weights = ResNet50_Weights.DEFAULT
+                self.model = resnet50(weights=weights)
+                self.procedure_resnet()
+        else:
+            if self.model_id.__contains__('WRN50'):
+                weights = models.Wide_ResNet50_2_Weights.DEFAULT
+                self.model =  models.wide_resnet50_2(weights=weights)
+                self.procedure_resnet()    
+            elif self.model_id.__contains__('WRN101'):
+                weights = models.Wide_ResNet101_2_Weights.DEFAULT
+                self.model =  models.wide_resnet101_2(weights=weights)
+                self.procedure_resnet()
+            elif self.model_id.__contains__('RN18'):
+                weights = models.ResNet18_Weights.DEFAULT
+                self.model = models.resnet18(weights=weights)
+                self.procedure_resnet()
+            elif self.model_id.__contains__('RN34'):
+                weights = models.ResNet34_Weights.DEFAULT
+                self.model = models.resnet34(weights=weights)
+                self.procedure_resnet()
+            elif self.model_id.__contains__('RN50'):
+                weights = models.ResNet50_Weights.DEFAULT
+                self.model = models.resnet50(weights=weights)
+                self.procedure_resnet()
+          
+        if self.model_id.__contains__('CX_XS'):
             weights = models.ConvNeXt_Tiny_Weights
             self.model = models.convnext_tiny(weights=weights).features
             self.procedure_convnext()
@@ -107,12 +146,9 @@ class Backbone(nn.Module):
         if self.layer_cut and not self.need_for_own_last_layer:
             self.model = nn.Sequential(*(list(self.model.children())[0:int(4+max(self.layers_needed))]))
             if self.prune_l1_unstructured[0]:
-                print('prune l1 norm')
                 self.model = prune_model_l1_strucured(self.model, pruning_perc=self.prune_l1_unstructured[1])
-                print('done')
             
             if self.prune_torch_pruning[0]:
-            
                 for param in self.parameters():
                     param.requires_grad = True
                 example_inputs = torch.rand((1,3,224,224))
@@ -127,7 +163,7 @@ class Backbone(nn.Module):
                     ch_sparsity=self.prune_torch_pruning[1], 
                     ignored_layers=ignored_layers,
                 )
-                # print(self.model(example_inputs))
+               
                 for i in range(iterative_steps):
                     if isinstance(imp, tp.importance.TaylorImportance):
                         # Taylor expansion requires gradients for importance estimation
@@ -136,29 +172,30 @@ class Backbone(nn.Module):
                     pruner.step()
                 for param in self.parameters():
                     param.requires_grad = False
-                    
-            if int(1) in self.layers_needed:
-                list(self.model.children())[4][-1].register_forward_hook(self.hook_t)
-            if int(2) in self.layers_needed:
-                list(self.model.children())[5][-1].register_forward_hook(self.hook_t)
-            if int(3) in self.layers_needed:
-                list(self.model.children())[6][-1].register_forward_hook(self.hook_t)
-            if int(4) in self.layers_needed:
-                list(self.model.children())[7][-1].register_forward_hook(self.hook_t)
+            if self.hooks_needed:     
+                if int(1) in self.layers_needed:
+                    list(self.model.children())[4][-1].register_forward_hook(self.hook_t)
+                if int(2) in self.layers_needed:
+                    list(self.model.children())[5][-1].register_forward_hook(self.hook_t)
+                if int(3) in self.layers_needed:
+                    list(self.model.children())[6][-1].register_forward_hook(self.hook_t)
+                if int(4) in self.layers_needed:
+                    list(self.model.children())[7][-1].register_forward_hook(self.hook_t)
 
         elif not self.layer_cut and not self.need_for_own_last_layer: #take the whole model
             if self.prune_l1_unstructured[0]:
                 print('prune l1 norm')
                 self.model = prune_model_l1_strucured(self.model, pruning_perc=self.prune_l1_unstructured[1])
                 print('done')
-            if int(1) in self.layers_needed:
-                self.model.layer1[-1].register_forward_hook(self.hook_t)
-            if int(2) in self.layers_needed:
-                self.model.layer2[-1].register_forward_hook(self.hook_t)
-            if int(3) in self.layers_needed:
-                self.model.layer3[-1].register_forward_hook(self.hook_t)
-            if int(4) in self.layers_needed:
-                self.model.layer4[-1].register_forward_hook(self.hook_t)
+            if self.hooks_needed:
+                if int(1) in self.layers_needed:
+                    self.model.layer1[-1].register_forward_hook(self.hook_t)
+                if int(2) in self.layers_needed:
+                    self.model.layer2[-1].register_forward_hook(self.hook_t)
+                if int(3) in self.layers_needed:
+                    self.model.layer3[-1].register_forward_hook(self.hook_t)
+                if int(4) in self.layers_needed:
+                    self.model.layer4[-1].register_forward_hook(self.hook_t)
 
         elif self.need_for_own_last_layer and self.model_id.__contains__('W'):
             layer_to_include = max(self.layers_needed)
@@ -198,17 +235,14 @@ class Backbone(nn.Module):
             self.model = nn.Sequential(layers_1, layers_2, output_layer)
 
             if self.prune_l1_unstructured[0]:
-                print('prune l1 norm')
                 self.model = prune_model_l1_strucured(self.model, pruning_perc=self.prune_l1_unstructured[1])
-                print('done')
-            
-            if len(self.layers_needed) > 1:
-                for layer in self.layers_needed[:-1]:
-                    list(self.model.children())[0][layer+3][-1].register_forward_hook(self.hook_WideResNet)
-            self.model[-1].register_forward_hook(self.hook_t)
+            if self.hooks_needed:
+                if len(self.layers_needed) > 1:
+                    for layer in self.layers_needed[:-1]:
+                        list(self.model.children())[0][layer+3][-1].register_forward_hook(self.hook_WideResNet)
+                self.model[-1].register_forward_hook(self.hook_t)
         
         elif self.need_for_own_last_layer and not self.model_id.__contains__('W'):
-            # print('here I am')
             layer_to_include = max(self.layers_needed)
             selected_idx_list = self.prune_output_layer[1]
             if len(self.layers_needed) > 1:
@@ -246,14 +280,14 @@ class Backbone(nn.Module):
                 print('prune l1 norm')
                 self.model = prune_model_l1_strucured(self.model, pruning_perc=self.prune_l1_unstructured[1])
                 print('done')
-            
-            if len(self.layers_needed) > 1:
-                for layer in self.layers_needed[:-1]:
-                    list(self.model.children())[0][layer+3][-1].register_forward_hook(self.hook_ResNet)
-            self.model[-1].register_forward_hook(self.hook_t)
+            if self.hooks_needed:
+                if len(self.layers_needed) > 1:
+                    for layer in self.layers_needed[:-1]:
+                        list(self.model.children())[0][layer+3][-1].register_forward_hook(self.hook_ResNet)
+                self.model[-1].register_forward_hook(self.hook_t)
 
     def procedure_convnext(self):
-        if self.layer_cut and not self.prune_output_layer[0]:
+        if self.layer_cut and not self.prune_output_layer[0] and self.hooks_needed:
             self.model = nn.Sequential(*(list(self.model.children())[0:int(2*max(self.layers_needed))]))
             if int(1) in self.layers_needed:
                 list(self.model.children())[1][-1].block.register_forward_hook(self.hook_t)
@@ -263,7 +297,7 @@ class Backbone(nn.Module):
                 list(self.model.children())[5][-1].block.register_forward_hook(self.hook_t)
             if int(4) in self.layers_needed:
                 list(self.model.children())[7][-1].block.register_forward_hook(self.hook_t)
-        elif not self.layer_cut and not self.prune_output_layer[0]:
+        elif not self.layer_cut and not self.prune_output_layer[0] and self.hooks_needed:
             if int(1) in self.layers_needed:
                 self.model[1][-1].block.register_forward_hook(self.hook_t)
             if int(2) in self.layers_needed:
@@ -272,14 +306,17 @@ class Backbone(nn.Module):
                 self.model[5][-1].block.register_forward_hook(self.hook_t)
             if int(4) in self.layers_needed:
                 self.model[7][-1].block.register_forward_hook(self.hook_t)
-    
+    # if self.hooks_needed:
     def init_features(self):
         self.features = []
 
     def forward(self, x_t):
-        # print(x_t.device)
-        self.init_features()
-        _ = self.model(x_t)
+        if self.hooks_needed:
+            # print(x_t.device)
+            self.init_features()
+            _ = self.model(x_t)
+        else:
+            self.features = self.model(x_t)
         return self.features
 
 
@@ -384,10 +421,10 @@ class OwnBasicblock(torch.nn.Module):
         
         if self.quantize:
             out = self.skip_add.add(out, identity)
-            print('1')
+            # print('1')
         else:
             out += identity
-            print('2')
+            # print('2')
         out = self.output_activation(out)
         # out = self.output_activation(out)
         return out
@@ -557,3 +594,103 @@ def quantize_model(model):
     quantized_model = quantize_dynamic(model, dtype=torch.qint8)
 
     return quantized_model
+
+
+class Scripted_Backbone(torch.nn.Module):
+    def __init__(self, backbone):
+        super().__init__()
+        self.backbone = torch.jit.trace(backbone, torch.rand((1,3,224,224)))
+        
+    def forward(self, x):
+        return self.backbone(x)
+
+if __name__ == '__main__':
+    
+    from quantize import quantize_model_into_quint8
+    
+    # device selection
+    if False: #torch.cuda.is_available():
+        device = torch.device('cuda:0')
+    else:
+        device = torch.device('cpu')
+        
+    print(f'device: {device}')
+    
+    
+    bb = Backbone(
+        model_id = 'RN34',
+        layers_needed = [3],
+        layer_cut = True,
+        prune_output_layer=[False, []],
+        prune_torch_pruning=[False, 0.0],
+        prune_l1_norm=[False, 0.0],
+        exclude_relu=False,
+        sigmoid_in_last_layer=True,
+        need_for_own_last_layer=False,
+        quantize_qint8_prepared=True,
+        hooks_needed=False
+        )
+    
+    bb = quantize_model_into_quint8(bb)
+    bb = Scripted_Backbone(bb)
+    
+    bb = torch.jit.script(bb)
+    # 
+    
+    # bb = bb.to(device).eval()
+    # example_inputs = torch.rand((1,3,224,224))
+    # bb = torch.jit.script(bb,(example_inputs))
+    
+    
+    
+    
+    
+    print(bb)
+    
+    ### test inference
+    # get loader
+    if True:
+        from torchvision import transforms
+        from PIL import Image
+        from datasets import MVTecDataset
+        from torchy.utils.data import DataLoader
+        from time import perf_counter
+        
+        data_transforms = transforms.Compose([
+                        transforms.Resize((224, 224), Image.ANTIALIAS),
+                        transforms.ToTensor(),
+                        transforms.CenterCrop(224),
+                        transforms.Normalize(mean=[0.485, 0.456, 0.406],
+                                            std=[0.229, 0.224, 0.225])]) # from imagenet
+        gt_transforms = transforms.Compose([
+                        transforms.Resize((224, 224)),
+                        transforms.ToTensor(),
+                        transforms.CenterCrop(224)])
+
+        dataset = MVTecDataset(root=r"/mnt/crucial/UNI/IIIT_Muen/MA/MVTechAD/own", transform=data_transforms, gt_transform=gt_transforms, phase='train', half=False)
+        loader = DataLoader(dataset, batch_size=16, shuffle=False, num_workers=12)
+        
+        # inference - one batch
+        
+        
+        with torch.no_grad():
+            for batch in loader:
+                # unpack
+                # print(len(batch))
+                x, _, _, _, _ = batch
+                x = x.to(device)
+                
+                
+                
+                print(f'input shape: {x.shape}')
+                st = perf_counter()
+                for k in range(1000):
+                    out = bb(x)
+                et = perf_counter()
+                print(f'output shape: #{len(out)} 1st: {out[0].shape}')
+                out = out[0]
+                # print(f'mean: {round(float(torch.mean(out), 5))}; std: {round(float(torch.std(out), 5))}')# min: {round(torch.min(out), 3)}; max: {round(torch.max(out), 3)}')
+                print(f'inference time: {round(et-st, 5)}s')
+                break
+            
+    

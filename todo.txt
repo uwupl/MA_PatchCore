@@ -1,8 +1,13 @@
 - check entropy for negative vals! --> revisit shannon entropy
 - calc size of coreset
 - watch ram usage (psutil) and get max
---> add them and visualize in plot
-- total automation of process
-- evaluate exclude_relu
+--> add them and visualize in pooling_strategy
 
-- VPN / remote access
+
+2906:
+- get rid of pytorch_lightning's ArgumentParser
+- implement different calc_distances
+- implement jit compilation
+- implement saving of quantized object
+- add pretrain & pruning before quantization
+- add new dataset

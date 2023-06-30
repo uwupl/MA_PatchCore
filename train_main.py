@@ -1,10 +1,12 @@
+
 import os
 from utils.backbone import Backbone, prune_naive, prune_model_nni, prune_output_layer, quantize_model, compress_model_nni
 from utils.datasets import MVTecDataset
 from utils.utils import min_max_norm, heatmap_on_image, cvt2heatmap, record_gpu, modified_kNN_score_calc, prep_dirs #  distance_matrix, softmax
 from utils.pooling import adaptive_pooling
 from utils.embedding import reshape_embedding, embedding_concat_frame
-from utils.search import KNN, NN
+from utils.search import KNN
+from utils.quantize import quantize_model_into_quint8
 import numpy as np
 import pandas as pd
 from PIL import Image
@@ -13,7 +15,6 @@ import cv2
 from sklearn.random_projection import SparseRandomProjection
 from sklearn.metrics import roc_auc_score
 from sampling_methods.kcenter_greedy import kCenterGreedy
-from scipy.ndimage import gaussian_filter
 import torch
 from torch.nn import functional as F
 from torchvision import transforms
@@ -27,6 +28,9 @@ import math
 from time import perf_counter as record_cpu
 from anomalib.models.components.sampling import k_center_greedy
 from torchinfo import summary
+# import warnings
+# warnings.filterwarnings("ignore")
+
 
 class PatchCore(pl.LightningModule):
     '''
@@ -69,17 +73,17 @@ class PatchCore(pl.LightningModule):
             - determines img_auc (and pxl_auc if self.only_img_lvl = False) using sklearn.metrics.roc_auc_score
             - creates pandas dataframe with results and all settings
     '''
-    def __init__(self, args):
+    def __init__(self):
         super(PatchCore, self).__init__()
         
         # options
-        self.category = args.category
-        self.load_size = args.load_size
-        self.input_size = args.input_size
-        self.n_neighbors = args.n_neighbors
-        self.coreset_sampling_ratio = args.coreset_sampling_ratio
-        self.dataset_path = args.dataset_path
-        self.batch_size = args.batch_size
+        self.category = 'own'#args.category
+        self.load_size = 224#args.load_size
+        self.input_size = 224#args.input_size
+        self.n_neighbors = 9#args.n_neighbors
+        self.coreset_sampling_ratio = 0.01#args.coreset_sampling_ratio
+        self.dataset_path = r"/mnt/crucial/UNI/IIIT_Muen/MA/MVTechAD"#args.dataset_path
+        self.batch_size = 32#args.batch_size
         self.n_next_patches = 5
         self.faiss_standard = False # temp
         self.faiss_quantized = False
@@ -112,14 +116,15 @@ class PatchCore(pl.LightningModule):
         self.iterative_pruning = (False, 0)
         self.quantize_model_with_nni = False
         self.quantize_model_pytorch = False
-        model.quantize_qint8 = True
+        self.quantize_qint8 = True
         # self.idx_chosen = np.array([], dtype=np.int32)
         self.idx_chosen = np.arange(128,dtype=np.int32) # TODO
         self.weight_by_entropy = False
         self.reduction_factor = 75
         self.pooling_strategy = ['default']#, 'max_1']#, 'first_trial']#, 'first_trial_max'] # 'first_trial'
+        self.cpu_arch = 'x86'
 
-        self.save_hyperparameters(args)
+        # self.save_hyperparameters(args)
         
         self.model_id = "WRN50"
         self.layers_needed = [2,3]#,3]#,3]#,3]
@@ -131,7 +136,7 @@ class PatchCore(pl.LightningModule):
         self.sparsity = 0.05
         self.exclude_relu = False
         self.sigmoid_in_last_layer = False
-
+        self.need_for_own_last_layer = False
         self.criterion = torch.nn.MSELoss(reduction='sum') # not really necessary, TODO: remove
 
         self.init_results_list()
@@ -220,12 +225,18 @@ class PatchCore(pl.LightningModule):
         self.embedding_dir_path, self.sample_path, self.source_code_save_path = prep_dirs(self.logger.log_dir, self.category)
         
         # get backbone
-        self.need_for_own_last_layer = True # TODO #,self.prune_output_layer[0] # if relu is last activation, but we want to prune the output layer, we need to set this to true to get own last layer
+        # self.need_for_own_last_layer = self.need_for_own_last_layer # TODO #,self.prune_output_layer[0] # if relu is last activation, but we want to prune the output layer, we need to set this to true to get own last layer
         if self.cuda_active_training:
-            self.model = Backbone(model_id=self.model_id, layers_needed=self.layers_needed, layer_cut=self.layer_cut, prune_output_layer=(False, []), prune_torch_pruning=self.prune_torch_pruning, prune_l1_norm=self.prune_l1_unstructured, exclude_relu=self.exclude_relu, sigmoid_in_last_layer = self.sigmoid_in_last_layer, need_for_own_last_layer=self.need_for_own_last_layer, quantize_qint8=self.quantize_qint8).cuda().eval() #, prune_l1_norm=self.prune_l1_unstructured
+            self.model = Backbone(model_id=self.model_id, layers_needed=self.layers_needed, layer_cut=self.layer_cut, prune_output_layer=(False, []), prune_torch_pruning=self.prune_torch_pruning, prune_l1_norm=self.prune_l1_unstructured, exclude_relu=self.exclude_relu, sigmoid_in_last_layer = self.sigmoid_in_last_layer, need_for_own_last_layer=self.need_for_own_last_layer, quantize_qint8_prepared=self.quantize_qint8).cuda().eval() #, prune_l1_norm=self.prune_l1_unstructured
+            if self.quantize_qint8:
+                self.model = quantize_model_into_quint8(model=self.model, category=self.category, cpu_arch=self.cpu_arch, dataset_path=r"/mnt/crucial/UNI/IIIT_Muen/MA/MVTechAD/")
+            
             self.dummy_input = torch.randn(1, 3, self.input_size, self.input_size).cuda()
         else:
-            self.model = Backbone(model_id=self.model_id, layers_needed=self.layers_needed, layer_cut=self.layer_cut, prune_output_layer=(False, []), prune_torch_pruning=self.prune_torch_pruning, prune_l1_norm=self.prune_l1_unstructured, exclude_relu=self.exclude_relu, sigmoid_in_last_layer = self.sigmoid_in_last_layer, need_for_own_last_layer=self.need_for_own_last_layer, quantize_qint8=self.quantize_qint8).eval() # prune_l1_norm=self.prune_l1_unstructured,
+            self.model = Backbone(model_id=self.model_id, layers_needed=self.layers_needed, layer_cut=self.layer_cut, prune_output_layer=(False, []), prune_torch_pruning=self.prune_torch_pruning, prune_l1_norm=self.prune_l1_unstructured, exclude_relu=self.exclude_relu, sigmoid_in_last_layer = self.sigmoid_in_last_layer, need_for_own_last_layer=self.need_for_own_last_layer, quantize_qint8_prepared==self.quantize_qint8).eval() # prune_l1_norm=self.prune_l1_unstructured,
+            if self.quantize_qint8:
+                self.model = quantize_model_into_quint8(model=self.model, category=self.category, cpu_arch=self.cpu_arch, dataset_path=r"/mnt/crucial/UNI/IIIT_Muen/MA/MVTechAD/")
+            
             self.dummy_input = torch.randn(1, 3, self.input_size, self.input_size)
         # determine output shape of model
 
@@ -259,7 +270,7 @@ class PatchCore(pl.LightningModule):
             for k in range(self.iterative_pruning[1]): 
                 print(f'\nIteration of iterative Pruning and/or channel selection: {k+1} of {self.iterative_pruning[1]}\n')
                 if self.pretrain_for_channel_selection:
-                    print('\n1\n')
+                    # print('\n1\n')
                     # print('Pretrain for channel selection ...')
                     _ = self.select_channels()#total_embeddings, pretrain=True) # also prunes the model's output layer
                 ### prune temp ###
@@ -274,9 +285,7 @@ class PatchCore(pl.LightningModule):
             if self.prune_structured_nni[0]:
                 self.model = prune_model_nni(self.model, self.prune_structured_nni[1], self.prune_structured_nni[2])
         
-        # print('Train model summary:')
-        # summary(self.model, (1, 3, 224, 224), depth = 2, device = 'cuda' if self.cuda_active else 'cpu')
-        self.model.eval() # to stop running_var move (maybe not critical)        
+        self.model.eval() # to stop running_var move
         # initialize numpy array for embeddings
         self.embedding_np = np.array([])
     
@@ -289,12 +298,12 @@ class PatchCore(pl.LightningModule):
             os.makedirs(self.log_path)
 
         # get Backbone
-        if self.cuda_active and torch.cuda.is_available():
-            self.model = torch.load(os.path.join(self.embedding_dir_path,'backbone.pth')).cuda()
-        else:
-            self.model = torch.load(os.path.join(self.embedding_dir_path,'backbone.pth'))#.cpu()#, map_location=torch.device('cpu'))
-            self.model.to(device='cpu')
-        self.model.eval()
+        # if self.cuda_active and torch.cuda.is_available():
+        #     self.model = torch.load(os.path.join(self.embedding_dir_path,'backbone.pth')).cuda()
+        # else:
+        #     self.model = torch.load(os.path.join(self.embedding_dir_path,'backbone.pth'))#.cpu()#, map_location=torch.device('cpu'))
+        #     # self.model.to(device='cpu')
+        # self.model.eval()
         
         # load coreset and initialize knn search
         if self.faiss_standard or self.faiss_quantized:
@@ -317,12 +326,19 @@ class PatchCore(pl.LightningModule):
     def training_step(self, batch, batch_idx): # save locally aware patch features
         x, _, _, _, _ = batch
         features = self.model(x)
+        if self.quantize_qint8:
+            features = list([features]) # TODO: probably because of missing forward hook there is no list of tensores as an output, but directly a tensor
         if self.save_features: # only one layer at a time!!
             self.features_to_store.append(features[0].detach().cpu())        
         embeddings = []
         for k, feature in enumerate(features):
             if type(self.pooling_strategy) == list:
+                # print('1: ', feature.shape)
+                # if self.quantize_qint8:
+                #     feature = feature[None,:]
                 for strategy in self.pooling_strategy:
+                    # print('hallihallo')
+                    # print('2: ', feature.shape)
                     pooled_feature = adaptive_pooling(feature, strategy)
                     embeddings.append(pooled_feature)
             else:
@@ -333,6 +349,8 @@ class PatchCore(pl.LightningModule):
         if batch_idx == int(0):
             self.embedding_np = reshape_embedding(np.array(embedding))
         else:
+            # print('lo')
+            # print(embedding.shape)
             self.embedding_np = np.append(self.embedding_np, reshape_embedding(np.array(embedding)), axis=0)#.extend(reshape_embedding(np.array(embedding)))
             
     def select_channels_core(self, total_embeddings):
@@ -733,6 +751,8 @@ class PatchCore(pl.LightningModule):
         embedding of features extracted in previous step. Eventually integrates dim reduction and adaptive pooling. 
         '''
         selected_features = []
+        if self.quantize_qint8:
+            features = list([features])
             
         for no_feature_map, feature in enumerate(features):
             ####
@@ -742,6 +762,10 @@ class PatchCore(pl.LightningModule):
             # pooled_features = adaptive_pooling(feature, self.pooling_strategy)#torch.nn.AvgPool2d(3, 1, 1)(feature) # TODO replace with adaptive pooling
             if type(self.pooling_strategy) == list:
                 for strategy in self.pooling_strategy:
+                    # if self.quantize_qint8:
+                    #     print('1: ', feature.shape)
+                    #     feature = feature[None, :]
+                    # print('2: ', feature.shape)
                     pooled_feature = adaptive_pooling(feature, strategy)
                     selected_features.append(pooled_feature)
             else:
@@ -923,31 +947,31 @@ class PatchCore(pl.LightningModule):
                 pd_sum = pd.Series(opt_dict).to_frame(self.category)
             pd_sum.to_csv(file_path)
             
-def get_args():
-    import argparse
-    parser = argparse.ArgumentParser(description='ANOMALYDETECTION')
-    parser.add_argument('--phase', choices=['train','test'], default='train')
-    parser.add_argument('--dataset_path', default=r"/mnt/crucial/UNI/IIIT_Muen/MA/MVTechAD") #/mnt/crucial/UNI/IIIT_Muen/MA/MVTechAD
-    parser.add_argument('--category', default='own', choices=['bottle', 'cable', 'capsule', 'carpet', 'grid', 'hazelnut', 'leather', 'metal_nut', 'pill', 'screw', 'tile', 'toothbrush', 'transistor', 'wood', 'zipper'])
-    parser.add_argument('--num_epochs', default=1)
-    parser.add_argument('--batch_size', default=32)
-    parser.add_argument('--load_size', default=224)
-    parser.add_argument('--input_size', default=224)
-    parser.add_argument('--coreset_sampling_ratio', default=0.01)
-    parser.add_argument('--project_root_path', default=r'./test')
-    parser.add_argument('--save_src_code', default=True)
-    parser.add_argument('--save_anomaly_map', default=True)
-    parser.add_argument('--n_neighbors', type=int, default=20)
-    args = parser.parse_args()
-    return args
+# def get_args():
+#     import argparse
+#     parser = argparse.ArgumentParser(description='ANOMALYDETECTION')
+#     parser.add_argument('--phase', choices=['train','test'], default='train')
+#     parser.add_argument('--dataset_path', default=r"/mnt/crucial/UNI/IIIT_Muen/MA/MVTechAD") #/mnt/crucial/UNI/IIIT_Muen/MA/MVTechAD
+#     parser.add_argument('--category', default='own', choices=['bottle', 'cable', 'capsule', 'carpet', 'grid', 'hazelnut', 'leather', 'metal_nut', 'pill', 'screw', 'tile', 'toothbrush', 'transistor', 'wood', 'zipper'])
+#     parser.add_argument('--num_epochs', default=1)
+#     parser.add_argument('--batch_size', default=32)
+#     parser.add_argument('--load_size', default=224)
+#     parser.add_argument('--input_size', default=224)
+#     parser.add_argument('--coreset_sampling_ratio', default=0.01)
+#     parser.add_argument('--project_root_path', default=r'./test')
+#     parser.add_argument('--save_src_code', default=True)
+#     parser.add_argument('--save_anomaly_map', default=True)
+#     parser.add_argument('--n_neighbors', type=int, default=20)
+#     args = parser.parse_args()
+#     return args
 
 if __name__ == '__main__':
 
     print('start')
 
-    args = get_args() # TODO remove
-    
-    model = PatchCore(args=args)
+    # args = get_args() # TODO remove
+    train_and_test = True
+    model = PatchCore()#args=args)
     model.model_id = 'RN34'
     model.layers_needed = [2]
     model.adapted_score_calc = True
@@ -955,15 +979,21 @@ if __name__ == '__main__':
     model.n_next_patches = 16
     model.cuda_active = False
     model.cuda_active_training = False
+    model.quantize_qint8 = True
+    model.coreset_sampling_method = 'random_selection'
+    model.measure_inference = True
+    model.own_knn = True
+    model.faiss_standard = False
     # model.need_for_own_last_layer
     os.environ['CUDA_VISIBLE_DEVICES'] = '-1'
-    if args.phase == 'train':
-        trainer = pl.Trainer.from_argparse_args(args, default_root_dir=os.path.join(args.project_root_path, args.category), max_epochs=args.num_epochs, accelerator='cpu', devices=1, precision = '32') # allow gpu for training    
+    if train_and_test:
+        trainer = pl.Trainer()
+        # trainer = pl.Trainer.from_argparse_args(args, default_root_dir=os.path.join(args.project_root_path, args.category), max_epochs=args.num_epochs, accelerator='cpu', devices=1, precision = '32') # allow gpu for training    
         trainer.fit(model)
         os.environ['CUDA_VISIBLE_DEVICES'] = '-1'
-        trainer = pl.Trainer.from_argparse_args(args, default_root_dir=os.path.join(args.project_root_path, args.category), max_epochs=args.num_epochs, accelerator='cpu', devices=1, precision='32') # but not for testing
+        # trainer = pl.Trainer.from_argparse_args(args, default_root_dir=os.path.join(args.project_root_path, args.category), max_epochs=args.num_epochs, accelerator='cpu', devices=1, precision='32') # but not for testing
         trainer.test(model)
-    elif args.phase == 'test':
+    else:
         trainer = pl.Trainer.from_argparse_args(args, default_root_dir=os.path.join(args.project_root_path, args.category), max_epochs=args.num_epochs, gpus=0)
         trainer.test(model)
 

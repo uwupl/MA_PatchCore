@@ -3,13 +3,20 @@ from typing import Any, Callable, List, Optional, Type, Union, Tuple
 from types import FunctionType
 
 import torch
-import torch.nn as nn
+if False:
+    from torchy.utils.data import DataLoader
+    from torchy import nn
+else:
+    from torch.utils.data import DataLoader
+    from torch import nn
+# import torch.nn as nn
+# import torchy.nn as nn
 from torch import Tensor
 from torchvision.transforms import functional as F, InterpolationMode
 
 # from ..transforms._presets import ImageClassification
 # from ..utils import _log_api_usage_once
-from torchvision.models._api import register_model, Weights, WeightsEnum
+from torchvision.models._api import Weights, WeightsEnum
 from torchvision.models._meta import _IMAGENET_CATEGORIES
 from torchvision.models._utils import _ovewrite_named_param, handle_legacy_interface
 
