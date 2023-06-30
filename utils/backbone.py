@@ -396,8 +396,6 @@ class OwnBasicblock(torch.nn.Module):
             self.output_activation = torch.nn.Sigmoid()#inplace=True)
         else:
             self.output_activation = torch.nn.ReLU(inplace=True)
-        # print(self.block_1)
-        # print(self.block_2)
         self.idx_selected = idx_selected
         self.prune_output_layer = prune_output_layer
         if len(self.idx_selected) > 0 and prune_output_layer:
@@ -619,31 +617,22 @@ if __name__ == '__main__':
     
     bb = Backbone(
         model_id = 'RN34',
-        layers_needed = [3],
+        layers_needed = [2,3],
         layer_cut = True,
         prune_output_layer=[False, []],
         prune_torch_pruning=[False, 0.0],
         prune_l1_norm=[False, 0.0],
         exclude_relu=False,
-        sigmoid_in_last_layer=True,
+        sigmoid_in_last_layer=False,
         need_for_own_last_layer=False,
         quantize_qint8_prepared=True,
-        hooks_needed=False
+        hooks_needed=True
         )
     
     bb = quantize_model_into_quint8(bb)
-    bb = Scripted_Backbone(bb)
+    # bb = Scripted_Backbone(bb)
     
-    bb = torch.jit.script(bb)
-    # 
-    
-    # bb = bb.to(device).eval()
-    # example_inputs = torch.rand((1,3,224,224))
-    # bb = torch.jit.script(bb,(example_inputs))
-    
-    
-    
-    
+    # bb = torch.jit.script(bb)
     
     print(bb)
     
@@ -684,7 +673,7 @@ if __name__ == '__main__':
                 
                 print(f'input shape: {x.shape}')
                 st = perf_counter()
-                for k in range(1000):
+                for k in range(1):
                     out = bb(x)
                 et = perf_counter()
                 print(f'output shape: #{len(out)} 1st: {out[0].shape}')
