@@ -604,7 +604,7 @@ class Scripted_Backbone(torch.nn.Module):
 
 if __name__ == '__main__':
     
-    from quantize import quantize_model_into_quint8
+    from quantize import quantize_model_into_qint8
     from torchinfo import summary
     
     # device selection
@@ -631,7 +631,7 @@ if __name__ == '__main__':
         )
     summary(bb, input_size=(1,3,224,224), verbose=1)
     
-    bb = quantize_model_into_quint8(bb)
+    bb = quantize_model_into_qint8(bb)
     # bb = Scripted_Backbone(bb)
     
     # bb = torch.jit.script(bb)

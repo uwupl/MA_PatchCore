@@ -79,7 +79,7 @@ def calibrate_model(model, loader, device=torch.device("cpu:0")):
         x, _, _, _, _ = inputs
         _ = model(x)
         
-def quantize_model_into_quint8(model, category = 'own', cpu_arch = 'x86', dataset_path = r"/mnt/crucial/UNI/IIIT_Muen/MA/MVTechAD/"):
+def quantize_model_into_qint8(model, category = 'own', cpu_arch = 'x86', dataset_path = r"/mnt/crucial/UNI/IIIT_Muen/MA/MVTechAD/"):
     '''
     Quantizes a model into quint8. Utilizes layer fusion and calibration.
     '''
