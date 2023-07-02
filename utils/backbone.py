@@ -605,6 +605,7 @@ class Scripted_Backbone(torch.nn.Module):
 if __name__ == '__main__':
     
     from quantize import quantize_model_into_quint8
+    from torchinfo import summary
     
     # device selection
     if False: #torch.cuda.is_available():
@@ -628,6 +629,7 @@ if __name__ == '__main__':
         quantize_qint8_prepared=True,
         hooks_needed=True
         )
+    summary(bb, input_size=(1,3,224,224), verbose=1)
     
     bb = quantize_model_into_quint8(bb)
     # bb = Scripted_Backbone(bb)
@@ -661,7 +663,7 @@ if __name__ == '__main__':
         
         # inference - one batch
         
-        
+        summary(bb, input_size=(1,3,224,224), verbose=1, device=device)
         with torch.no_grad():
             for batch in loader:
                 # unpack

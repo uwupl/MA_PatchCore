@@ -170,19 +170,33 @@ if __name__ == '__main__':
 
     model = get_default_PatchCoreModel()
     manager = TestContainer()
-    model.model_id = 'RN34'
+    manager.total_runs = 2*4*3
     model.adapted_score_calc = True
     model.n_neighbors = 4
     model.n_next_patches = 16
     model.layer_cut = True
-    run_id_prefix = ''
-    
-    # default run
-    manager.this_run_id = run_id_prefix + 'default'
-    manager.run(model)
-    
-    ##############################
-    # define test loop here
-    ##############################
+    run_id_prefix = '0207_quantized_qint8_Layer_Comp-'
+    for model_id in ['RN34', 'RN50', 'RN18', 'WRN50']:# 'WRN101', 'WRN152']:
+        model.model_id = model_id
+        for layers_needed in [[1], [2], [3]]:
+            if layers_needed == [1]:
+                model.coreset_sampling_method = 'random_selection' # whole dataset does not fit on the gpu and cpu is too slow
+                model.specific_number_of_examples = 1000*4
+            elif layers_needed == [2]:
+                model.coreset_sampling_method = 'k_center_greedy'
+                model.specific_number_of_examples = 1000*2
+            elif layers_needed == [3]:
+                model.coreset_sampling_method = 'k_center_greedy'
+                model.specific_number_of_examples = 1000*1 # in order to get the same amount of data points for each layer
+            model.layers_needed = layers_needed
+            model.quantize_qint8 = True
+            model.group_id = f'{run_id_prefix}-quantized-Layer {layers_needed[0]} of {model.model_id}'
+            manager.this_run_id = run_id_prefix
+            manager.run(model)
+            
+            model.quantize_qint8 = False
+            model.group_id = f'{run_id_prefix}-not_quantized-Layer {layers_needed[0]} of {model.model_id}'
+            manager.this_run_id = run_id_prefix
+            manager.run(model)
     
     print(manager.get_summarization())

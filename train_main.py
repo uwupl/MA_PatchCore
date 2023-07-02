@@ -28,8 +28,6 @@ import math
 from time import perf_counter as record_cpu
 from anomalib.models.components.sampling import k_center_greedy
 from torchinfo import summary
-# import warnings
-# warnings.filterwarnings("ignore")
 
 
 class PatchCore(pl.LightningModule):
@@ -224,6 +222,10 @@ class PatchCore(pl.LightningModule):
         self.acc_filename = f'acc_{self.group_id}_{self.time_stamp}.csv'
         self.embedding_dir_path, self.sample_path, self.source_code_save_path = prep_dirs(self.logger.log_dir, self.category)
         
+        # change device to cuda if qint8 quantization is used
+        if self.quantize_qint8: # TODO: get it to work with cuda
+            self.cuda_active_training, self.cuda_active = False, False
+        
         # get backbone
         # self.need_for_own_last_layer = self.need_for_own_last_layer # TODO #,self.prune_output_layer[0] # if relu is last activation, but we want to prune the output layer, we need to set this to true to get own last layer
         if self.cuda_active_training:
@@ -233,7 +235,7 @@ class PatchCore(pl.LightningModule):
             
             self.dummy_input = torch.randn(1, 3, self.input_size, self.input_size).cuda()
         else:
-            self.model = Backbone(model_id=self.model_id, layers_needed=self.layers_needed, layer_cut=self.layer_cut, prune_output_layer=(False, []), prune_torch_pruning=self.prune_torch_pruning, prune_l1_norm=self.prune_l1_unstructured, exclude_relu=self.exclude_relu, sigmoid_in_last_layer = self.sigmoid_in_last_layer, need_for_own_last_layer=self.need_for_own_last_layer, quantize_qint8_prepared==self.quantize_qint8).eval() # prune_l1_norm=self.prune_l1_unstructured,
+            self.model = Backbone(model_id=self.model_id, layers_needed=self.layers_needed, layer_cut=self.layer_cut, prune_output_layer=(False, []), prune_torch_pruning=self.prune_torch_pruning, prune_l1_norm=self.prune_l1_unstructured, exclude_relu=self.exclude_relu, sigmoid_in_last_layer = self.sigmoid_in_last_layer, need_for_own_last_layer=self.need_for_own_last_layer, quantize_qint8_prepared=self.quantize_qint8).eval() # prune_l1_norm=self.prune_l1_unstructured,
             if self.quantize_qint8:
                 self.model = quantize_model_into_quint8(model=self.model, category=self.category, cpu_arch=self.cpu_arch, dataset_path=r"/mnt/crucial/UNI/IIIT_Muen/MA/MVTechAD/")
             
@@ -321,7 +323,7 @@ class PatchCore(pl.LightningModule):
         # initialize results list
         self.init_results_list()
         
-        summary(self.model, depth=5, input_size=(1,3,224,224), col_names=['input_size', 'output_size', 'trainable', 'mult_adds', 'num_params'])
+        # summary(self.model, depth=5, input_size=(1,3,224,224), col_names=['input_size', 'output_size', 'trainable', 'mult_adds', 'num_params'])
         
     def training_step(self, batch, batch_idx): # save locally aware patch features
         x, _, _, _, _ = batch
@@ -422,10 +424,13 @@ class PatchCore(pl.LightningModule):
             
             print('self.prune_output_layer: ', self.prune_output_layer)
             self.model = prune_output_layer(self.model, self.idx_chosen, self.output_shape[1])
-            
-        print('Model output shape: ', self.model(torch.randn(1,3,224,224).cpu())[0].shape)
-        print('Number of channels chosen: ', len(self.idx_chosen))
-        print('shape of total_embeddings: ', total_embeddings.shape)
+        try:
+            device = 'cuda' if next(self.model.parameters()).is_cuda else 'cpu'
+            print('Model output shape: ', self.model(torch.randn(1,3,224,224).to(device))[0].shape)
+            print('Number of channels chosen: ', len(self.idx_chosen))
+            print('shape of total_embeddings: ', total_embeddings.shape)
+        except:
+            print('Something has failed. Probably the device is not able to be determined.')
         return total_embeddings
         
     def select_channels(self,total_embeddings=None):
@@ -474,7 +479,11 @@ class PatchCore(pl.LightningModule):
 
         if self.coreset_sampling_ratio == 1.0:
             self.embedding_coreset = total_embeddings
-        else:                  
+        else:
+            if self.specific_number_of_examples > 0:
+                self.coreset_sampling_ratio = float(self.specific_number_of_examples/total_embeddings.shape[0])
+            # else:
+            #     sampling_ratio = float(self.coreset_sampling_ratio)
             if self.coreset_sampling_method.__contains__('sparse_projection'): # two different implementation that yield the same result (approximately)
                 self.randomprojector = SparseRandomProjection(n_components='auto', eps=0.9) # 'auto' => Johnson-Lindenstrauss lemma
                 self.randomprojector.fit(total_embeddings)
@@ -483,14 +492,10 @@ class PatchCore(pl.LightningModule):
                 selected_idx = selector.select_batch(model=self.randomprojector, already_selected=[], N=int(total_embeddings.shape[0]*self.coreset_sampling_ratio))
             elif self.coreset_sampling_method.__contains__('k_center_greedy'):
                 # total_embeddings_copy = total_embeddings.astype(np.float32)
-                if self.specific_number_of_examples > 0:
-                    sampling_ratio = float(self.specific_number_of_examples/total_embeddings.shape[0])
+                if self.cuda_active or self.cuda_active_training or torch.cuda.is_available(): # use gpu anyway if available
+                    sampler = k_center_greedy.KCenterGreedy(embedding=torch.from_numpy(total_embeddings).cuda(), sampling_ratio=self.coreset_sampling_ratio)
                 else:
-                    sampling_ratio = float(self.coreset_sampling_ratio)
-                if self.cuda_active or self.cuda_active_training:
-                    sampler = k_center_greedy.KCenterGreedy(embedding=torch.from_numpy(total_embeddings).cuda(), sampling_ratio=sampling_ratio)
-                else:
-                    sampler = k_center_greedy.KCenterGreedy(embedding=torch.from_numpy(total_embeddings), sampling_ratio=sampling_ratio)
+                    sampler = k_center_greedy.KCenterGreedy(embedding=torch.from_numpy(total_embeddings), sampling_ratio=self.coreset_sampling_ratio)
                 selected_idx = sampler.select_coreset_idxs()
             elif self.coreset_sampling_method.__contains__('random_selection'):
                 selected_idx = np.random.choice(total_embeddings.shape[0], int(total_embeddings.shape[0]*self.coreset_sampling_ratio), replace=False)
@@ -519,6 +524,7 @@ class PatchCore(pl.LightningModule):
             self.index.add(self.embedding_coreset) 
             faiss.write_index(self.index,  os.path.join(self.embedding_dir_path,'index.faiss'))
         else:
+            print(self.embedding_coreset.shape)
             with open(os.path.join(self.embedding_dir_path, 'embedding.pickle'), 'wb') as f:
                 pickle.dump(self.embedding_coreset, f)
         
@@ -734,17 +740,18 @@ class PatchCore(pl.LightningModule):
         '''
         Pass data through backbone specified in class pactchcore
         '''
-        if self.cuda_active:
-            x = x.cuda()
-        # else:
-        #     x = x.cpu()
-        if False:#self.pruning and (self.reduce_via_entropy or self.reduce_via_std): # TODO
-            # output = self(x)
-            # output = np.array(output[0].cpu())
-            # return torch.from_numpy(np.take(output, self.idx_chosen, axis=1))
-            return [self.model(x)[0][:,self.idx_chosen,:,:]]
-        else:
-            return self.model(x)
+        with torch.no_grad():
+            if self.cuda_active:
+                x = x.cuda()
+            # else:
+            #     x = x.cpu()
+            if False:#self.pruning and (self.reduce_via_entropy or self.reduce_via_std): # TODO
+                # output = self(x)
+                # output = np.array(output[0].cpu())
+                # return torch.from_numpy(np.take(output, self.idx_chosen, axis=1))
+                return [self.model(x)[0][:,self.idx_chosen,:,:]]
+            else:
+                return self.model(x)
             
     def feature_embedding(self, features, batch_size_1, batch_size):
         '''
@@ -896,9 +903,14 @@ class PatchCore(pl.LightningModule):
             print(f'\n\nMEAN INFERENCE TIME: {pd_run_times["#11 whole process cpu"].mean()} ms\n')
         if True:
             # get backbone stats
-            summary_of_backbone = summary(self.model, (1, 3, self.load_size, self.load_size), verbose = 0)#, device='cpu')
-            estimated_total_size = (summary_of_backbone.total_input + summary_of_backbone.total_output_bytes + summary_of_backbone.total_param_bytes) / 1e6 # in MB
-            number_of_mult_adds = summary_of_backbone.total_mult_adds / 1e6 # in M
+            try:
+                device = next(self.model.parameters()).device
+                summary_of_backbone = summary(self.model, (1, 3, self.load_size, self.load_size), verbose = 0, device=device)
+                estimated_total_size = (summary_of_backbone.total_input + summary_of_backbone.total_output_bytes + summary_of_backbone.total_param_bytes) / 1e6 # in MB
+                number_of_mult_adds = summary_of_backbone.total_mult_adds / 1e6 # in M
+            except:
+                estimated_total_size = 0.0
+                number_of_mult_adds = 0.0
             opt_dict = {
                 'backbone': self.model_id,
                 'pooling_strategy': str(self.pooling_strategy),
@@ -947,33 +959,26 @@ class PatchCore(pl.LightningModule):
                 pd_sum = pd.Series(opt_dict).to_frame(self.category)
             pd_sum.to_csv(file_path)
             
-# def get_args():
-#     import argparse
-#     parser = argparse.ArgumentParser(description='ANOMALYDETECTION')
-#     parser.add_argument('--phase', choices=['train','test'], default='train')
-#     parser.add_argument('--dataset_path', default=r"/mnt/crucial/UNI/IIIT_Muen/MA/MVTechAD") #/mnt/crucial/UNI/IIIT_Muen/MA/MVTechAD
-#     parser.add_argument('--category', default='own', choices=['bottle', 'cable', 'capsule', 'carpet', 'grid', 'hazelnut', 'leather', 'metal_nut', 'pill', 'screw', 'tile', 'toothbrush', 'transistor', 'wood', 'zipper'])
-#     parser.add_argument('--num_epochs', default=1)
-#     parser.add_argument('--batch_size', default=32)
-#     parser.add_argument('--load_size', default=224)
-#     parser.add_argument('--input_size', default=224)
-#     parser.add_argument('--coreset_sampling_ratio', default=0.01)
-#     parser.add_argument('--project_root_path', default=r'./test')
-#     parser.add_argument('--save_src_code', default=True)
-#     parser.add_argument('--save_anomaly_map', default=True)
-#     parser.add_argument('--n_neighbors', type=int, default=20)
-#     args = parser.parse_args()
-#     return args
-
+def one_run_of_model(model):
+    '''
+    Executes one run of the model. All parameters are set in the model class.
+    '''
+    trainer = pl.Trainer(max_epochs=1, accelerator='gpu' if model.cuda_active_training and not model.quantize_qint8 else 'cpu', inference_mode=True, enable_model_summary=False)
+    trainer.fit(model)
+    trainer = pl.Trainer(max_epochs=1, accelerator='gpu' if model.cuda_active and not model.quantize_qint8 else 'cpu', inference_mode=True, enable_model_summary=True)
+    trainer.test(model)
+            
 if __name__ == '__main__':
 
     print('start')
+    
+    import warnings
+    warnings.filterwarnings("ignore") 
 
-    # args = get_args() # TODO remove
     train_and_test = True
     model = PatchCore()#args=args)
     model.model_id = 'RN34'
-    model.layers_needed = [2]
+    model.layers_needed = [1]
     model.adapted_score_calc = True
     model.n_neighbors = 4
     model.n_next_patches = 16
@@ -984,16 +989,6 @@ if __name__ == '__main__':
     model.measure_inference = True
     model.own_knn = True
     model.faiss_standard = False
-    # model.need_for_own_last_layer
-    os.environ['CUDA_VISIBLE_DEVICES'] = '-1'
-    if train_and_test:
-        trainer = pl.Trainer()
-        # trainer = pl.Trainer.from_argparse_args(args, default_root_dir=os.path.join(args.project_root_path, args.category), max_epochs=args.num_epochs, accelerator='cpu', devices=1, precision = '32') # allow gpu for training    
-        trainer.fit(model)
-        os.environ['CUDA_VISIBLE_DEVICES'] = '-1'
-        # trainer = pl.Trainer.from_argparse_args(args, default_root_dir=os.path.join(args.project_root_path, args.category), max_epochs=args.num_epochs, accelerator='cpu', devices=1, precision='32') # but not for testing
-        trainer.test(model)
-    else:
-        trainer = pl.Trainer.from_argparse_args(args, default_root_dir=os.path.join(args.project_root_path, args.category), max_epochs=args.num_epochs, gpus=0)
-        trainer.test(model)
-
+    # model.specific_number_of_examples = 1000
+    
+    one_run_of_model(model)

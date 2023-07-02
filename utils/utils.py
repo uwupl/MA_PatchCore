@@ -331,12 +331,12 @@ def remove_all_empty_run_dirs():
     print(f'Removed {counter} empty folders')
     return None
 
-def remove_uncomplete_runs():
+def remove_uncomplete_runs(main_dir = r'/mnt/crucial/UNI/IIIT_Muen/MA/code/productive/MA_PatchCore/'):
     '''
     checks if all csv files are complete and removes uncomplete runs
     '''
     counter = 0
-    dir_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'results')
+    dir_path = os.path.join(main_dir, 'results')
     for folder in os.listdir(dir_path):
         if os.path.isdir(os.path.join(dir_path, folder, 'csv')):
             if len(os.listdir(os.path.join(dir_path, folder, 'csv'))) == 0:

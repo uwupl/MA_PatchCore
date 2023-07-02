@@ -9,7 +9,7 @@ from time import perf_counter
 
 from torchvision import transforms
 from PIL import Image
-from datasets import MVTecDataset
+from .datasets import MVTecDataset
 import os
 
 class QuantizedModel(nn.Module):
@@ -31,8 +31,8 @@ def generate_fuse_list(model):
     all_names = [name for name, _ in model.named_modules()]
 
     if '0.0' in all_names:
-        print('Own last layer')
-        print(all_names)
+        # print('Own last layer')
+        # print(all_names)
         fuse_list.append(("0.0", "0.1", "0.2")) # this is always the same
         fuse_list.append(("2.block_1.final_0","2.block_1.final_1", "2.block_1.final_2"))
         fuse_list.append(("2.block_2.final_3","2.block_2.final_4"))#, "2.block_2.final_5"))#, '2.block_2.final_3'))
@@ -43,7 +43,7 @@ def generate_fuse_list(model):
         fuse_list.extend(fuse_list_2)
         fuse_list.extend(fuse_list_3)
     else:
-        print('generic resnet')
+        # print('generic resnet')
 
         fuse_list.append(("0", "1", "2")) # this is always the same
         
@@ -62,7 +62,7 @@ def generate_fuse_list(model):
     return fuse_list
 
 def fuse_model(model, fuse_list):
-    print(fuse_list)
+    # print(fuse_list)
     fused_model = torch.quantization.fuse_modules(model, fuse_list)
 
     return fused_model
@@ -119,11 +119,11 @@ def quantize_model_into_quint8(model, category = 'own', cpu_arch = 'x86', datase
     # finally convert into quantized model
     c = torch.quantization.convert(b, inplace=True)
     c.eval()
-    print(c)
+    # print(c)
     # test inference
     for inputs in loader:
         x, _, _, _, _ = inputs
-        print(x.shape)
+        # print(x.shape)
         y = c(x)
         break
     # print(y)
