@@ -1,6 +1,6 @@
 import torch
 from utils.utils import distance_matrix
-
+from scipy.spatial.distance import cdist
 class NN():
     def __init__(self, X=None, Y=None, p=2):
         self.p = p
@@ -23,8 +23,36 @@ class NN():
         return self.train_label[labels]
 
 class KNN(NN):
-    def __init__(self, X=None, Y=None, k=3, p=2):
+    def __init__(self, X=None, Y=None, k=3, p=None, metric='euclidean'):
         self.k = k
+        self.p = p
+        # self.metrices = { 
+        #             0:'euclidean', # 0.88
+        #             1:'minkowski', # nur mit p spannend
+        #             2:'cityblock', # manhattan
+        #             3:'chebyshev',
+        #             4:'cosine',
+        #             5:'correlation',
+        #             6:'hamming',
+        #             7:'jaccard',
+        #             8:'braycurtis',
+        #             9:'canberra',
+        #             10:'jensenshannon',
+        #             # 11:'matching', # sysnonym for hamming
+        #             11:'dice',
+        #             12:'kulczynski1',
+        #             13:'rogerstanimoto',
+        #             14:'russellrao',
+        #             15:'sokalmichener',
+        #             16:'sokalsneath',
+        #             # 18:'wminkowski',
+        #             17:'mahalanobis',
+        #             18:'seuclidean',
+        #             19:'sqeuclidean',
+        #             }
+        # self.metrices_dict = {metric: i for i, metric in enumerate(metrices)}
+        self.metric = metric
+        print(f"\nUsing metric: {self.metric}\n")
         super().__init__(X, Y, p)
 
     def train(self, X, Y):
@@ -33,6 +61,9 @@ class KNN(NN):
             self.unique_labels = self.train_label.unique()
 
     def predict(self, x):
-        dist = torch.cdist(x, self.train_pts, self.p)
+        if self.p is None:
+            dist = torch.from_numpy(cdist(x, self.train_pts, metric=self.metric))
+        else:
+            dist = torch.from_numpy(cdist(x, self.train_pts, metric=self.metric, p=self.p))
         knn = dist.topk(self.k, largest=False)
         return knn

@@ -86,7 +86,7 @@ class PatchCore(pl.LightningModule):
         self.faiss_standard = False # temp
         self.faiss_quantized = False
         # self.faiss_quantized_
-        self.own_knn = False
+        self.own_knn = True
         self.adapted_score_calc = False
         self.coreset_sampling_method = 'k_center_greedy' # options: 'k_center_greedy', 'random_selection', 'sparse_projection'
         self.specific_number_of_examples = int(0)
@@ -114,14 +114,39 @@ class PatchCore(pl.LightningModule):
         self.iterative_pruning = (False, 0)
         self.quantize_model_with_nni = False
         self.quantize_model_pytorch = False
-        self.quantize_qint8 = True
+        self.quantize_qint8 = False
         # self.idx_chosen = np.array([], dtype=np.int32)
         self.idx_chosen = np.arange(128,dtype=np.int32) # TODO
         self.weight_by_entropy = False
         self.reduction_factor = 75
         self.pooling_strategy = ['default']#, 'max_1']#, 'first_trial']#, 'first_trial_max'] # 'first_trial'
         self.cpu_arch = 'x86'
-
+        self.metrices = { 
+            0:'euclidean', # 0.88
+            1:'minkowski', # nur mit p spannend
+            2:'cityblock', # manhattan
+            3:'chebyshev',
+            4:'cosine',
+            5:'correlation',
+            6:'hamming',
+            7:'jaccard',
+            8:'braycurtis',
+            9:'canberra',
+            10:'jensenshannon',
+            # 11:'matching', # sysnonym for hamming
+            11:'dice',
+            12:'kulczynski1',
+            13:'rogerstanimoto',
+            14:'russellrao',
+            15:'sokalmichener',
+            16:'sokalsneath',
+            # 18:'wminkowski',
+            17:'mahalanobis',
+            18:'seuclidean',
+            19:'sqeuclidean',
+            }
+        self.metric_id = 0
+        self.metrics_p = None
         # self.save_hyperparameters(args)
         
         self.model_id = "WRN50"
@@ -315,7 +340,11 @@ class PatchCore(pl.LightningModule):
                 self.index = faiss.index_cpu_to_gpu(res, 0 ,self.index)
         elif self.own_knn:
             self.embedding_coreset = pickle.load(open(os.path.join(self.embedding_dir_path, 'embedding.pickle'), 'rb'))
-            self.knn = KNN(torch.from_numpy(self.embedding_coreset), k=self.n_neighbors) #.cuda()
+            if self.metrics_p is not None:
+                self.knn = KNN(torch.from_numpy(self.embedding_coreset), k=self.n_neighbors, metric=self.metrices[self.metric_id], p=self.metrics_p)#.cuda()
+            else:
+                  self.knn = KNN(torch.from_numpy(self.embedding_coreset), k=self.n_neighbors, metric=self.metrices[self.metric_id]) #.cuda()
+            
         else:
             self.embedding_coreset = pickle.load(open(os.path.join(self.embedding_dir_path, 'embedding.pickle'), 'rb'))
             self.nbrs = NearestNeighbors(n_neighbors=self.n_neighbors, algorithm='ball_tree', metric='minkowski', p=2).fit(self.embedding_coreset)
@@ -940,6 +969,7 @@ class PatchCore(pl.LightningModule):
                 'faiss_standard': self.faiss_standard,
                 'faiss_quantized': self.faiss_quantized,
                 'own_knn': self.own_knn,
+                'distance_metric': self.metrices[self.metric_id],
                 'backbone_storage_[MB]': estimated_total_size,
                 'backbone_mult_adds_[M]': number_of_mult_adds,
                 'feature_extraction_[ms]': pd_run_times['#1 feature extraction cpu'].mean() if self.measure_inference else 0.0,
@@ -978,17 +1008,19 @@ if __name__ == '__main__':
     train_and_test = True
     model = PatchCore()#args=args)
     model.model_id = 'RN34'
-    model.layers_needed = [1]
+    model.layers_needed = [2]
     model.adapted_score_calc = True
     model.n_neighbors = 4
     model.n_next_patches = 16
     model.cuda_active = False
     model.cuda_active_training = False
-    model.quantize_qint8 = True
+    model.quantize_qint8 = False
     model.coreset_sampling_method = 'random_selection'
-    model.measure_inference = True
+    model.measure_inference = False
     model.own_knn = True
     model.faiss_standard = False
-    # model.specific_number_of_examples = 1000
+    model.specific_number_of_examples = 1000
+    model.category = 'pill'
+    model.metric_id = 4
     
     one_run_of_model(model)
