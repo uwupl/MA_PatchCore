@@ -236,7 +236,17 @@ def plot_results(labels, feature_extraction, embedding, search, calc_scores, own
     
     x = np.arange(len(labels))  # the label locations
     width = width  # the width of the bars
-
+    ### temp ###
+    #Direct input 
+    # plt.rcParams['text.latex.preamble']=[r"\usepackage{lmodern}"]
+    # #Options
+    # params = {'text.usetex' : True,
+    #         'font.size' : 11,
+    #         'font.family' : 'lmodern',
+    #         'text.latex.unicode': True,
+    #         }
+    # plt.rcParams.update(params)     
+    ### temp ###
     fig, ax = plt.subplots(figsize=fig_size, dpi=300)
     if not only_auc:
         ax_2 = ax.twinx()
