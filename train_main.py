@@ -117,6 +117,7 @@ class PatchCore(pl.LightningModule):
         self.quantize_model_with_nni = False
         self.quantize_model_pytorch = False
         self.quantize_qint8 = False
+        self.quantize_qint8_torchvision = False
         # self.idx_chosen = np.array([], dtype=np.int32)
         self.idx_chosen = np.arange(128,dtype=np.int32) # TODO
         self.weight_by_entropy = False
@@ -144,7 +145,31 @@ class PatchCore(pl.LightningModule):
             16:'sokalsneath',
             # 18:'wminkowski',
             17:'mahalanobis',
-            18:'seuclidean',
+            18:'seuclidean',        # self.metrices = { 
+        #             0:'euclidean', # 0.88
+        #             1:'minkowski', # nur mit p spannend
+        #             2:'cityblock', # manhattan
+        #             3:'chebyshev',
+        #             4:'cosine',
+        #             5:'correlation',
+        #             6:'hamming',
+        #             7:'jaccard',
+        #             8:'braycurtis',
+        #             9:'canberra',
+        #             10:'jensenshannon',
+        #             # 11:'matching', # sysnonym for hamming
+        #             11:'dice',
+        #             12:'kulczynski1',
+        #             13:'rogerstanimoto',
+        #             14:'russellrao',
+        #             15:'sokalmichener',
+        #             16:'sokalsneath',
+        #             # 18:'wminkowski',
+        #             17:'mahalanobis',
+        #             18:'seuclidean',
+        #             19:'sqeuclidean',
+        #             }
+        # self.metrices_dict = {metric: i for i, metric in enumerate(metrices)}
             19:'sqeuclidean',
             }
         self.metric_id = 0
@@ -267,15 +292,15 @@ class PatchCore(pl.LightningModule):
         # get backbone
         # self.need_for_own_last_layer = self.need_for_own_last_layer # TODO #,self.prune_output_layer[0] # if relu is last activation, but we want to prune the output layer, we need to set this to true to get own last layer
         if self.cuda_active_training:
-            self.model = Backbone(model_id=self.model_id, layers_needed=self.layers_needed, layer_cut=self.layer_cut, prune_output_layer=(False, []), prune_torch_pruning=self.prune_torch_pruning, prune_l1_norm=self.prune_l1_unstructured, exclude_relu=self.exclude_relu, sigmoid_in_last_layer = self.sigmoid_in_last_layer, need_for_own_last_layer=self.need_for_own_last_layer, quantize_qint8_prepared=self.quantize_qint8).cuda().eval() #, prune_l1_norm=self.prune_l1_unstructured
+            self.model = Backbone(model_id=self.model_id, layers_needed=self.layers_needed, layer_cut=self.layer_cut, prune_output_layer=(False, []), prune_torch_pruning=self.prune_torch_pruning, prune_l1_norm=self.prune_l1_unstructured, exclude_relu=self.exclude_relu, sigmoid_in_last_layer = self.sigmoid_in_last_layer, need_for_own_last_layer=self.need_for_own_last_layer, quantize_qint8_prepared=self.quantize_qint8, quantize_qint8_torchvision=self.quantize_qint8_torchvision).cuda().eval() #, prune_l1_norm=self.prune_l1_unstructured
             if self.quantize_qint8:
-                self.model = quantize_model_into_qint8(model=self.model, category=self.category, cpu_arch=self.cpu_arch, dataset_path=r"/mnt/crucial/UNI/IIIT_Muen/MA/MVTechAD/")
+                self.model = quantize_model_into_qint8(model=self.model, layers_needed=self.layers_needed, category=self.category, cpu_arch=self.cpu_arch, dataset_path=r"/mnt/crucial/UNI/IIIT_Muen/MA/MVTechAD/")
             
             self.dummy_input = torch.randn(1, 3, self.input_size, self.input_size).cuda()
         else:
-            self.model = Backbone(model_id=self.model_id, layers_needed=self.layers_needed, layer_cut=self.layer_cut, prune_output_layer=(False, []), prune_torch_pruning=self.prune_torch_pruning, prune_l1_norm=self.prune_l1_unstructured, exclude_relu=self.exclude_relu, sigmoid_in_last_layer = self.sigmoid_in_last_layer, need_for_own_last_layer=self.need_for_own_last_layer, quantize_qint8_prepared=self.quantize_qint8).eval() # prune_l1_norm=self.prune_l1_unstructured,
+            self.model = Backbone(model_id=self.model_id, layers_needed=self.layers_needed, layer_cut=self.layer_cut, prune_output_layer=(False, []), prune_torch_pruning=self.prune_torch_pruning, prune_l1_norm=self.prune_l1_unstructured, exclude_relu=self.exclude_relu, sigmoid_in_last_layer = self.sigmoid_in_last_layer, need_for_own_last_layer=self.need_for_own_last_layer, quantize_qint8_prepared=self.quantize_qint8, quantize_qint8_torchvision=self.quantize_qint8_torchvision).eval() # prune_l1_norm=self.prune_l1_unstructured,
             if self.quantize_qint8:
-                self.model = quantize_model_into_qint8(model=self.model, category=self.category, cpu_arch=self.cpu_arch, dataset_path=r"/mnt/crucial/UNI/IIIT_Muen/MA/MVTechAD/")
+                self.model = quantize_model_into_qint8(model=self.model, layers_needed=self.layers_needed, category=self.category, cpu_arch=self.cpu_arch, dataset_path=r"/mnt/crucial/UNI/IIIT_Muen/MA/MVTechAD/")
             
             self.dummy_input = torch.randn(1, 3, self.input_size, self.input_size)
         # determine output shape of model
@@ -345,6 +370,8 @@ class PatchCore(pl.LightningModule):
         #     # self.model.to(device='cpu')
         # self.model.eval()
         
+        print(self.model)
+        
         # load coreset and initialize knn search
         if not self.multiple_coresets[0] or self.multiple_coresets[1] == 1:
             if self.faiss_standard or self.faiss_quantized:
@@ -383,8 +410,8 @@ class PatchCore(pl.LightningModule):
     def training_step(self, batch, batch_idx): # save locally aware patch features
         x, _, _, _, _ = batch
         features = self.model(x)
-        if self.quantize_qint8:
-            features = list([features]) # TODO: probably because of missing forward hook there is no list of tensores as an output, but directly a tensor
+        # if self.quantize_qint8:
+        #     features = list([features]) # TODO: probably because of missing forward hook there is no list of tensores as an output, but directly a tensor
         if self.save_features: # only one layer at a time!!
             self.features_to_store.append(features[0].detach().cpu())        
         embeddings = []
@@ -532,7 +559,7 @@ class PatchCore(pl.LightningModule):
         if self.quantize_model_pytorch:
             self.model = quantize_model(self.model)
         if self.specific_number_of_examples > 0:
-            self.core_set_sampling_ratio = float(self.specific_number_of_examples/total_embeddings.shape[0])
+            self.coreset_sampling_ratio = float(self.specific_number_of_examples/total_embeddings.shape[0])
         if not self.multiple_coresets[0] or self.coreset_sampling_ratio == 1.0:
             if self.coreset_sampling_ratio == 1.0:
                 self.embedding_coreset = total_embeddings
@@ -891,8 +918,8 @@ class PatchCore(pl.LightningModule):
         embedding of features extracted in previous step. Eventually integrates dim reduction and adaptive pooling. 
         '''
         selected_features = []
-        if self.quantize_qint8:
-            features = list([features])
+        # if self.quantize_qint8:
+        #     features = list([features]) not needed anymore(?)
             
         for _, feature in enumerate(features):
             ####
@@ -1112,15 +1139,19 @@ class PatchCore(pl.LightningModule):
                 pd_sum = pd.Series(opt_dict).to_frame(self.category)
             pd_sum.to_csv(file_path)
             
-def one_run_of_model(model):
+def one_run_of_model(model, train_and_test = True):
     '''
     Executes one run of the model. All parameters are set in the model class.
     '''
-    trainer = pl.Trainer(max_epochs=1, accelerator='gpu' if model.cuda_active_training and not model.quantize_qint8 else 'cpu', inference_mode=True, enable_model_summary=False)
-    trainer.fit(model)
-    trainer = pl.Trainer(max_epochs=1, accelerator='gpu' if model.cuda_active and not model.quantize_qint8 else 'cpu', inference_mode=True, enable_model_summary=True)
-    trainer.test(model)
-            
+    if train_and_test:
+        trainer = pl.Trainer(max_epochs=1, accelerator='gpu' if model.cuda_active_training and not model.quantize_qint8 else 'cpu', inference_mode=True, enable_model_summary=False)
+        trainer.fit(model)
+        trainer = pl.Trainer(max_epochs=1, accelerator='gpu' if model.cuda_active and not model.quantize_qint8 else 'cpu', inference_mode=True, enable_model_summary=True)
+        trainer.test(model)
+    else:
+        trainer = pl.Trainer(max_epochs=1, accelerator='gpu' if model.cuda_active and not model.quantize_qint8 else 'cpu', inference_mode=True, enable_model_summary=True)
+        trainer.test(model)
+
 if __name__ == '__main__':
 
     print('start')
@@ -1128,22 +1159,29 @@ if __name__ == '__main__':
     import warnings
     warnings.filterwarnings("ignore") 
 
+    os.environ['CUDA_VISIBLE_DEVICES'] = '-1'
     train_and_test = True
     model = PatchCore()#args=args)
-    model.model_id = 'RN34'
-    model.layers_needed = [2]
+    model.model_id = 'RN18'
+    model.layers_needed = [2,3]
+    model.layer_cut = False
+    # model.hooks_needed = False
+    model.need_for_own_last_layer = False
     model.adapted_score_calc = True
     model.n_neighbors = 4
     model.n_next_patches = 16
     model.cuda_active = False
     model.cuda_active_training = False
-    model.quantize_qint8 = False
-    model.coreset_sampling_method = 'k_center_greedy'
+    model.quantize_qint8 = True
+    model.coreset_sampling_method = 'random_selection'
     model.measure_inference = False
+    model.quantize_qint8_torchvision = False
     model.own_knn = True
     model.faiss_standard = False
     model.specific_number_of_examples = 1000
     model.category = 'pill'
-    model.metric_id = 4
+    model.layer_cut = True
+    # model.metric_id = 4 # cosine
+    # model.metric_id = 2 # manhattan / L1
     
-    one_run_of_model(model)
+    one_run_of_model(model, train_and_test)

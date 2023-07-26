@@ -32,6 +32,7 @@ class Backbone(nn.Module):
         sigmoid_in_last_layer: bool = False,
         need_for_own_last_layer: bool = False,
         quantize_qint8_prepared: bool = False,
+        quantize_qint8_torchvision: bool = False,
         hooks_needed: bool = True,
     ) -> None:
         super().__init__()
@@ -44,12 +45,13 @@ class Backbone(nn.Module):
         self.exclude_relu = exclude_relu
         self.sigmoid_in_last_layer = sigmoid_in_last_layer
         self.need_for_own_last_layer = sigmoid_in_last_layer or exclude_relu or prune_output_layer[0] or need_for_own_last_layer
-        self.quantize_qint8 = quantize_qint8_prepared
+        self.quantize_qint8_prepared = quantize_qint8_prepared
+        self.quantize_qint8_torchvision = quantize_qint8_torchvision
         self.hooks_needed = hooks_needed
         if self.hooks_needed:
             self.init_features()
         
-        if self.quantize_qint8:
+        if self.quantize_qint8_prepared:
             if self.model_id.__contains__('WRN50'):
                 weights = Wide_ResNet50_2_Weights.DEFAULT
                 self.model =  wide_resnet50_2(weights=weights)
@@ -70,6 +72,17 @@ class Backbone(nn.Module):
                 weights = ResNet50_Weights.DEFAULT
                 self.model = resnet50(weights=weights)
                 self.procedure_resnet()
+        elif self.quantize_qint8_torchvision:
+            if self.model_id.__contains__('RN50'):
+                weights = models.quantization.ResNet50_QuantizedWeights.DEFAULT
+                self.model = models.quantization.resnet50(weights=weights, quantize=True)
+                self.procedure_resnet()
+            elif self.model_id.__contains__('RN18'):
+                weights = models.quantization.ResNet18_QuantizedWeights.DEFAULT
+                self.model = models.quantization.resnet18(weights=weights, quantize=True)
+                self.procedure_resnet()     
+            else:
+                raise NotImplementedError('Only ResNet18 and ResNet50 are supported for quantization with torchvision\' quantization models.')
         else:
             if self.model_id.__contains__('WRN50'):
                 weights = models.Wide_ResNet50_2_Weights.DEFAULT
@@ -115,6 +128,10 @@ class Backbone(nn.Module):
     def hook_t(self,module, input, output):
         self.features.append(output)
     
+    def hook_q(self, module, input, output):
+        output = output.dequantize()
+        self.features.append(output)
+
     def hook_WideResNet(self, module, input, output):
         '''
         takes the model and prune it if desired. Mainly, hooks are placed here. For Nets with Bottleneck, the hook is placed at the end of the Bottleneck.
@@ -172,15 +189,26 @@ class Backbone(nn.Module):
                     pruner.step()
                 for param in self.parameters():
                     param.requires_grad = False
-            if self.hooks_needed:     
-                if int(1) in self.layers_needed:
-                    list(self.model.children())[4][-1].register_forward_hook(self.hook_t)
-                if int(2) in self.layers_needed:
-                    list(self.model.children())[5][-1].register_forward_hook(self.hook_t)
-                if int(3) in self.layers_needed:
-                    list(self.model.children())[6][-1].register_forward_hook(self.hook_t)
-                if int(4) in self.layers_needed:
-                    list(self.model.children())[7][-1].register_forward_hook(self.hook_t)
+            if self.hooks_needed:
+                if not self.quantize_qint8_torchvision:     
+                    if int(1) in self.layers_needed:
+                        list(self.model.children())[4][-1].register_forward_hook(self.hook_t)
+                    if int(2) in self.layers_needed:
+                        list(self.model.children())[5][-1].register_forward_hook(self.hook_t)
+                    if int(3) in self.layers_needed:
+                        list(self.model.children())[6][-1].register_forward_hook(self.hook_t)
+                    if int(4) in self.layers_needed:
+                        list(self.model.children())[7][-1].register_forward_hook(self.hook_t)
+                else:
+                    # print('\n\n\nquantize\n\n')
+                    if int(1) in self.layers_needed:
+                        list(self.model.children())[4][-1].register_forward_hook(self.hook_q)
+                    if int(2) in self.layers_needed:
+                        list(self.model.children())[5][-1].register_forward_hook(self.hook_q)
+                    if int(3) in self.layers_needed:
+                        list(self.model.children())[6][-1].register_forward_hook(self.hook_q)
+                    if int(4) in self.layers_needed:
+                        list(self.model.children())[7][-1].register_forward_hook(self.hook_q)
 
         elif not self.layer_cut and not self.need_for_own_last_layer: #take the whole model
             if self.prune_l1_unstructured[0]:
@@ -188,14 +216,25 @@ class Backbone(nn.Module):
                 self.model = prune_model_l1_strucured(self.model, pruning_perc=self.prune_l1_unstructured[1])
                 print('done')
             if self.hooks_needed:
-                if int(1) in self.layers_needed:
-                    self.model.layer1[-1].register_forward_hook(self.hook_t)
-                if int(2) in self.layers_needed:
-                    self.model.layer2[-1].register_forward_hook(self.hook_t)
-                if int(3) in self.layers_needed:
-                    self.model.layer3[-1].register_forward_hook(self.hook_t)
-                if int(4) in self.layers_needed:
-                    self.model.layer4[-1].register_forward_hook(self.hook_t)
+                if not self.quantize_qint8_torchvision:     
+                    if int(1) in self.layers_needed:
+                        list(self.model.children())[4][-1].register_forward_hook(self.hook_t)
+                    if int(2) in self.layers_needed:
+                        list(self.model.children())[5][-1].register_forward_hook(self.hook_t)
+                    if int(3) in self.layers_needed:
+                        list(self.model.children())[6][-1].register_forward_hook(self.hook_t)
+                    if int(4) in self.layers_needed:
+                        list(self.model.children())[7][-1].register_forward_hook(self.hook_t)
+                else:
+                    print('\nquantize\n')
+                    if int(1) in self.layers_needed:
+                        list(self.model.children())[4][-1].register_forward_hook(self.hook_q)
+                    if int(2) in self.layers_needed:
+                        list(self.model.children())[5][-1].register_forward_hook(self.hook_q)
+                    if int(3) in self.layers_needed:
+                        list(self.model.children())[6][-1].register_forward_hook(self.hook_q)
+                    if int(4) in self.layers_needed:
+                        list(self.model.children())[7][-1].register_forward_hook(self.hook_q)
 
         elif self.need_for_own_last_layer and self.model_id.__contains__('W'):
             layer_to_include = max(self.layers_needed)
@@ -670,8 +709,6 @@ if __name__ == '__main__':
                 # print(len(batch))
                 x, _, _, _, _ = batch
                 x = x.to(device)
-                
-                
                 
                 print(f'input shape: {x.shape}')
                 st = perf_counter()

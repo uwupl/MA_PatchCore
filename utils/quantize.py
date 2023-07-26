@@ -3,27 +3,45 @@ if False:
     from torchy.utils.data import DataLoader
     from torchy import nn
 else:
-    from torch.utils.data import DataLoader
+    from torch.utils.data import DataLoader, Dataset
     from torch import nn
 from time import perf_counter
 
+import numpy as np
 from torchvision import transforms
 from PIL import Image
 from .datasets import MVTecDataset
 import os
+import torchvision
+
 
 class QuantizedModel(nn.Module):
-    def __init__(self, model):
+    def __init__(self, model, layers_needed=None):
         super(QuantizedModel, self).__init__()
-        self.quant = torch.quantization.QuantStub()
-        self.model = model
-        self.dequant = torch.quantization.DeQuantStub()
+        # self.quant = torch.quantization.QuantStub()
+        self.model = nn.Sequential(
+            torch.quantization.QuantStub(),
+            model,
+            torch.quantization.DeQuantStub()
+        )
+        self.layers_needed = layers_needed
+        if self.layers_needed is not None:
+            for layer in self.layers_needed:
+                self.model[1][layer+3][-1].register_forward_hook(self.hook_q)
+        else:
+            self.model[-2][-1].register_forward_hook(self.hook_q)
     
-    def forward(self, x):
-        x = self.quant(x)
-        x = self.model(x)
-        x = self.dequant(x)
-        return x
+    def init_features(self):
+        self.features = []
+
+    def forward(self, x_t):
+        self.init_features()
+        _ = self.model(x_t)
+        return self.features
+    
+    def hook_q(self, module, input, output):
+        output = output.dequantize()
+        self.features.append(output)
 
 def generate_fuse_list(model):
     fuse_list = []
@@ -79,25 +97,47 @@ def calibrate_model(model, loader, device=torch.device("cpu:0")):
         x, _, _, _, _ = inputs
         _ = model(x)
         
-def quantize_model_into_qint8(model, category = 'own', cpu_arch = 'x86', dataset_path = r"/mnt/crucial/UNI/IIIT_Muen/MA/MVTechAD/"):
+def quantize_model_into_qint8(model, layers_needed = None, category = 'own', cpu_arch = 'x86', dataset_path = r"/mnt/crucial/UNI/IIIT_Muen/MA/MVTechAD/"):
     '''
     Quantizes a model into quint8. Utilizes layer fusion and calibration.
     '''
     st = perf_counter()    
     data_transforms = transforms.Compose([
-                    transforms.Resize((224, 224), Image.ANTIALIAS),
+                    transforms.Resize((256, 256), Image.ANTIALIAS),
                     transforms.ToTensor(),
                     transforms.CenterCrop(224),
                     transforms.Normalize(mean=[0.485, 0.456, 0.406],
                                         std=[0.229, 0.224, 0.225])]) # from imagenet
     gt_transforms = transforms.Compose([
-                    transforms.Resize((224, 224)),
+                    transforms.Resize((256, 256)),
                     transforms.ToTensor(),
                     transforms.CenterCrop(224)])
     
-    data_path = os.path.join(dataset_path, category)
-    dataset = MVTecDataset(root=data_path, transform=data_transforms, gt_transform=gt_transforms, phase='train', half=False)
-    loader = DataLoader(dataset, batch_size=1, shuffle=False, num_workers=12)
+    
+    
+    # cats = ['bottle','own', 'cable', 'capsule', 'carpet', 'grid', 'hazelnut', 'leather', 'metal_nut', 'pill', 'screw', 'tile', 'toothbrush', 'transistor', 'wood', 'zipper']
+    # if False:
+    # first option: calibrate with target domain
+    # data_path = os.path.join(dataset_path, category)
+    # dataset = MVTecDataset(root=data_path, transform=data_transforms, gt_transform=gt_transforms, phase='train', half=False)
+    
+    # second option: calibrate with random images
+    # dataset = RandomImageDataset(num_images=1000, transform=data_transforms)
+    
+    # third option: calibrate with imagenet TODO
+    # dataset = torchvision.datasets.ImageNet(root='/mnt/crucial/UNI/IIIT_Muen/MA/ILSVRC2012/', split='val', transform=data_transforms)
+    
+    # fourth option: calibrate with stacked MCTec datasets
+    cats = ['bottle', 'cable', 'capsule', 'carpet', 'grid', 'hazelnut', 'leather', 'metal_nut', 'pill', 'screw', 'tile', 'toothbrush', 'transistor', 'wood', 'zipper', 'own']
+    dataset = None
+    for cat in cats:
+        if dataset is None:
+            dataset = MVTecDataset(root=os.path.join(dataset_path, cat), transform=data_transforms, gt_transform=gt_transforms, phase='train', half=False)
+        else:
+            dataset = torch.utils.data.ConcatDataset([dataset, MVTecDataset(root=os.path.join(dataset_path, cat), transform=data_transforms, gt_transform=gt_transforms, phase='train', half=False)])
+        
+            
+    loader = DataLoader(dataset, batch_size=10, shuffle=False, num_workers=12)
 
     # load model
     # model = Backbone(model_id='RN34', layers_needed=[2], layer_cut=True, prune_output_layer=(False, []), sigmoid_in_last_layer=False, need_for_own_last_layer=False, quantize_qint8=True).cpu()
@@ -107,12 +147,13 @@ def quantize_model_into_qint8(model, category = 'own', cpu_arch = 'x86', dataset
     fuse_list = generate_fuse_list(fused_model)
     a = fuse_model(fused_model, fuse_list)
     # add quantization layers
-    b = QuantizedModel(a)
+    b = QuantizedModel(a, layers_needed=layers_needed)
+    
     # set config for architecture
-    # print('\n\n')
-    # print(b)
-    # print('\n\n')
-    b.qconfig = torch.quantization.get_default_qconfig(cpu_arch) # 'qnnpack''x86'
+    print('\n\n')
+    print(b)
+    print('\n\n')
+    b.qconfig = torch.quantization.get_default_qconfig('fbgemm')#cpu_arch) # 'qnnpack','x86'
     torch.quantization.prepare(b, inplace=True)
     # calibrate using training data
     calibrate_model(b, loader, device=torch.device("cpu:0"))
@@ -131,3 +172,25 @@ def quantize_model_into_qint8(model, category = 'own', cpu_arch = 'x86', dataset
     print(f'Quantization took {(et-st):.2f} seconds')
     
     return c
+
+
+class RandomImageDataset(Dataset):
+    def __init__(self, num_images, transform=None):
+        self.num_images = num_images
+        self.transform = transform
+
+    def __len__(self):
+        return self.num_images
+
+    def __getitem__(self, idx):
+        # Generate a random image
+        image = np.random.randint(0, 256, size=(224, 224, 3), dtype=np.uint8)
+
+        # Convert numpy array to PIL image
+        image = transforms.ToPILImage()(image)
+
+        # Apply transformations if provided
+        if self.transform:
+            image = self.transform(image)
+
+        return image, 0, 0, 0, 0
