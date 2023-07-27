@@ -287,7 +287,7 @@ class PatchCore(pl.LightningModule):
         self.embedding_dir_path, self.sample_path, self.source_code_save_path = prep_dirs(self.logger.log_dir, self.category)
         
         # change device to cuda if qint8 quantization is used
-        if self.quantize_qint8: # TODO: get it to work with cuda
+        if self.quantize_qint8: # get it to work with cuda --> not possible with pytorch quantization
             self.cuda_active_training, self.cuda_active = False, False
         
         # get backbone
@@ -394,10 +394,15 @@ class PatchCore(pl.LightningModule):
                     self.index = faiss.index_cpu_to_gpu(res, 0 ,self.index)
             elif self.own_knn:
                 self.embedding_coreset = pickle.load(open(os.path.join(self.embedding_dir_path, 'embedding.pickle'), 'rb'))
-                if self.metrics_p is not None:
-                    self.knn = KNN(torch.from_numpy(self.embedding_coreset), k=self.n_neighbors, metric=self.metrices[self.metric_id], p=self.metrics_p)#.cuda()
+                if self.metrics_p is not None: # for minkowski distance (and some other I think)
+                    self.knn = KNN(torch.from_numpy(self.embedding_coreset), k=self.n_neighbors, metric=self.metrices[self.metric_id], p=self.metrics_p)
+                elif self.metric_id == 17: # mahalanobis distance
+                    print('loading inv_cov')
+                    # inv_cov = pickle.load(open(os.path.join(self.embedding_dir_path, 'inv_cov.pickle'), 'rb')) # from training
+                    inv_cov = np.load(os.path.join(self.embedding_dir_path, 'inv_cov.npy')) 
+                    self.knn = KNN(torch.from_numpy(self.embedding_coreset), k=self.n_neighbors, metric=self.metrices[self.metric_id], inv_cov=inv_cov)
                 else:
-                    self.knn = KNN(torch.from_numpy(self.embedding_coreset), k=self.n_neighbors, metric=self.metrices[self.metric_id]) #.cuda()
+                    self.knn = KNN(torch.from_numpy(self.embedding_coreset), k=self.n_neighbors, metric=self.metrices[self.metric_id])
                 
             else:
                 self.embedding_coreset = pickle.load(open(os.path.join(self.embedding_dir_path, 'embedding.pickle'), 'rb'))
@@ -411,6 +416,10 @@ class PatchCore(pl.LightningModule):
             elif self.own_knn:
                 if self.metrics_p is not None:
                     self.knn = [KNN(torch.from_numpy(pickle.load(open(os.path.join(self.embedding_dir_path, f'embedding_{k}.pickle'), 'rb'))), k=self.n_neighbors, metric=self.metrices[self.metric_id], p=self.metrics_p) for k in range(self.multiple_coresets[1])]
+                elif self.metric_id == 17: # mahalanobis distance
+                    print('loading inv_cov')
+                    inv_cov = np.load(os.path.join(self.embedding_dir_path, 'inv_cov.npy'))  #pickle.load(open(os.path.join(self.embedding_dir_path, 'inv_cov.pickle'), 'rb')) # from training
+                    self.knn = [KNN(torch.from_numpy(pickle.load(open(os.path.join(self.embedding_dir_path, f'embedding_{k}.pickle'), 'rb'))), k=self.n_neighbors, metric=self.metrices[self.metric_id], inv_cov=inv_cov) for k in range(self.multiple_coresets[1])]
                 else:
                     self.knn = [KNN(torch.from_numpy(pickle.load(open(os.path.join(self.embedding_dir_path, f'embedding_{k}.pickle'), 'rb'))), k=self.n_neighbors, metric=self.metrices[self.metric_id]) for k in range(self.multiple_coresets[1])]
             else:
@@ -636,6 +645,12 @@ class PatchCore(pl.LightningModule):
         # in case coreset has less samples than required for neighbors
         if self.n_neighbors > self.embedding_coreset.shape[0]:
             self.n_neighbors = self.embedding_coreset.shape[0]
+            
+        # calculate inverse covariance matrix for mahalanobis distance
+        if self.metric_id == 17: # mahalanobis distance
+            print('calculating inverse covariance matrix')
+            inv_cov = np.linalg.inv(np.cov(total_embeddings, rowvar=False))
+            np.save(os.path.join(self.embedding_dir_path, 'inv_cov.npy'), inv_cov)
         
         if not self.multiple_coresets[0] or self.coreset_sampling_ratio == 1.0:
             if self.faiss_quantized:
@@ -1190,7 +1205,7 @@ if __name__ == '__main__':
     model.n_next_patches = 16
     model.cuda_active = False
     model.cuda_active_training = False
-    model.quantize_qint8 = True
+    model.quantize_qint8 = False
     model.calibration_dataset = 'random'
     model.coreset_sampling_method = 'random_selection'
     model.measure_inference = False
@@ -1200,6 +1215,8 @@ if __name__ == '__main__':
     model.specific_number_of_examples = 1000
     model.category = 'pill'
     model.layer_cut = True
+    model.save_embeddings = False
+    model.metric_id = 17    
     # model.metric_id = 4 # cosine
     # model.metric_id = 2 # manhattan / L1
     
