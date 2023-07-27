@@ -117,13 +117,14 @@ class PatchCore(pl.LightningModule):
         self.quantize_model_with_nni = False
         self.quantize_model_pytorch = False
         self.quantize_qint8 = False
+        self.calibration_dataset = 'imagenet' # options: 'target', 'mvtec', 'imagenet', 'random' or None for no calibration and loading pretrained model; only relevant if self.quantize_qint8 = True
         self.quantize_qint8_torchvision = False
         # self.idx_chosen = np.array([], dtype=np.int32)
         self.idx_chosen = np.arange(128,dtype=np.int32) # TODO
         self.weight_by_entropy = False
         self.reduction_factor = 75
         self.pooling_strategy = ['default']#, 'max_1']#, 'first_trial']#, 'first_trial_max'] # 'first_trial'
-        self.cpu_arch = 'x86'
+        self.cpu_arch = 'x86' # if anything else than x86, qnnpack is used
         self.metrices = { 
             0:'euclidean', # 0.88
             1:'minkowski', # nur mit p spannend
@@ -294,13 +295,14 @@ class PatchCore(pl.LightningModule):
         if self.cuda_active_training:
             self.model = Backbone(model_id=self.model_id, layers_needed=self.layers_needed, layer_cut=self.layer_cut, prune_output_layer=(False, []), prune_torch_pruning=self.prune_torch_pruning, prune_l1_norm=self.prune_l1_unstructured, exclude_relu=self.exclude_relu, sigmoid_in_last_layer = self.sigmoid_in_last_layer, need_for_own_last_layer=self.need_for_own_last_layer, quantize_qint8_prepared=self.quantize_qint8, quantize_qint8_torchvision=self.quantize_qint8_torchvision).cuda().eval() #, prune_l1_norm=self.prune_l1_unstructured
             if self.quantize_qint8:
-                self.model = quantize_model_into_qint8(model=self.model, layers_needed=self.layers_needed, category=self.category, cpu_arch=self.cpu_arch, dataset_path=r"/mnt/crucial/UNI/IIIT_Muen/MA/MVTechAD/")
+                raise NotImplementedError('qint8 quantization for GPU not implemented')
+                # self.model = quantize_model_into_qint8(model=self.model, layers_needed=self.layers_needed, calibrate=self.calibration_dataset ,category=self.category, cpu_arch=self.cpu_arch, dataset_path=r"/mnt/crucial/UNI/IIIT_Muen/MA/MVTechAD/")
             
             self.dummy_input = torch.randn(1, 3, self.input_size, self.input_size).cuda()
         else:
             self.model = Backbone(model_id=self.model_id, layers_needed=self.layers_needed, layer_cut=self.layer_cut, prune_output_layer=(False, []), prune_torch_pruning=self.prune_torch_pruning, prune_l1_norm=self.prune_l1_unstructured, exclude_relu=self.exclude_relu, sigmoid_in_last_layer = self.sigmoid_in_last_layer, need_for_own_last_layer=self.need_for_own_last_layer, quantize_qint8_prepared=self.quantize_qint8, quantize_qint8_torchvision=self.quantize_qint8_torchvision).eval() # prune_l1_norm=self.prune_l1_unstructured,
             if self.quantize_qint8:
-                self.model = quantize_model_into_qint8(model=self.model, layers_needed=self.layers_needed, category=self.category, cpu_arch=self.cpu_arch, dataset_path=r"/mnt/crucial/UNI/IIIT_Muen/MA/MVTechAD/")
+                self.model = quantize_model_into_qint8(model=self.model, layers_needed=self.layers_needed, calibrate=self.calibration_dataset, category=self.category, cpu_arch=self.cpu_arch, dataset_path=r"/mnt/crucial/UNI/IIIT_Muen/MA/MVTechAD/")
             
             self.dummy_input = torch.randn(1, 3, self.input_size, self.input_size)
         # determine output shape of model
@@ -355,6 +357,7 @@ class PatchCore(pl.LightningModule):
         self.embedding_np = np.array([])
     
     def on_test_start(self):
+        
         # initialize paths
         self.latences_filename = f'latences_{self.group_id}_{self.time_stamp}.csv'
         self.log_path = os.path.join(os.path.dirname(__file__), "results",f"{self.group_id}", "csv")
@@ -363,15 +366,25 @@ class PatchCore(pl.LightningModule):
             os.makedirs(self.log_path)
 
         # get Backbone
-        # if self.cuda_active and torch.cuda.is_available():
-        #     self.model = torch.load(os.path.join(self.embedding_dir_path,'backbone.pth')).cuda()
-        # else:
-        #     self.model = torch.load(os.path.join(self.embedding_dir_path,'backbone.pth'))#.cpu()#, map_location=torch.device('cpu'))
-        #     # self.model.to(device='cpu')
-        # self.model.eval()
-        
+        # temp for ensuring model is loaded correctly
+        del self.model
+        if self.cuda_active and torch.cuda.is_available():
+            self.model = torch.load(os.path.join(self.embedding_dir_path,'backbone.pth')).cuda()
+            if self.quantize_qint8:
+                raise NotImplementedError('qint8 quantization for GPU not implemented')
+        else:
+            if not (self.quantize_qint8 or self.quantize_qint8_torchvision): # then it is fine to load the model entirely
+                self.model = torch.load(os.path.join(self.embedding_dir_path,'backbone.pth'))#.cpu()#, map_location=torch.device('cpu'))
+            else: # in this case we have to create an instance of the model first and load the state dict afterwards to get the same configuration as during training
+                 
+                # args have to match training!
+                self.model = Backbone(model_id=self.model_id, layers_needed=self.layers_needed, layer_cut=self.layer_cut, prune_output_layer=self.prune_output_layer, prune_torch_pruning=self.prune_torch_pruning, prune_l1_norm=self.prune_l1_unstructured, exclude_relu=self.exclude_relu, sigmoid_in_last_layer = self.sigmoid_in_last_layer, need_for_own_last_layer=self.need_for_own_last_layer, quantize_qint8_prepared=self.quantize_qint8, quantize_qint8_torchvision=self.quantize_qint8_torchvision).eval() 
+                if self.quantize_qint8:
+                    self.model = quantize_model_into_qint8(model=self.model, layers_needed=self.layers_needed, calibrate=None, category=self.category, cpu_arch=self.cpu_arch, dataset_path=r"/mnt/crucial/UNI/IIIT_Muen/MA/MVTechAD/")
+                    self.model.load_state_dict(torch.load(os.path.join(self.embedding_dir_path,'backbone.pth'), map_location=torch.device('cpu')))
+                                        
+        self.model.eval()
         print(self.model)
-        
         # load coreset and initialize knn search
         if not self.multiple_coresets[0] or self.multiple_coresets[1] == 1:
             if self.faiss_standard or self.faiss_quantized:
@@ -669,7 +682,11 @@ class PatchCore(pl.LightningModule):
                         pickle.dump(self.embedding_coreset[k,...], f)
         
         # save model
-        torch.save(self.model, os.path.join(self.embedding_dir_path,'backbone.pth'))
+        if not (self.quantize_qint8 or self.quantize_qint8_torchvision):
+            torch.save(self.model, os.path.join(self.embedding_dir_path,'backbone.pth'))
+        else:
+            torch.save(self.model.state_dict(), os.path.join(self.embedding_dir_path,'backbone.pth'))
+        # torch.save(self.model, os.path.join(self.embedding_dir_path,'backbone.pth'))
             
     def test_step(self, batch, batch_idx):
         '''
@@ -794,7 +811,8 @@ class PatchCore(pl.LightningModule):
         else:
             x, gt, label, file_name, x_type = batch
             self.eval_one_step_test(score_patches, score, anomaly_map, x, gt, label, file_name, x_type)
-                             
+    
+    @torch.inference_mode()                    
     def test_step_core(self, batch, measure=False):
         '''
         basically this is one test step where one batch is processed. This func is embedded in the actual def test_step. 
@@ -903,7 +921,7 @@ class PatchCore(pl.LightningModule):
             
             return features, embeddings, score_patches, score, anomaly_map, t_0_cpu, t_1_cpu, t_2_cpu, t_3_cpu, t_4_cpu, t_0_gpu, t_1_gpu, t_2_gpu, t_3_gpu, t_4_gpu
         
-    @torch.no_grad()    
+    @torch.inference_mode()    
     def feature_extraction(self, x):
         '''
         Pass data through backbone specified in class pactchcore
@@ -1173,6 +1191,7 @@ if __name__ == '__main__':
     model.cuda_active = False
     model.cuda_active_training = False
     model.quantize_qint8 = True
+    model.calibration_dataset = 'random'
     model.coreset_sampling_method = 'random_selection'
     model.measure_inference = False
     model.quantize_qint8_torchvision = False

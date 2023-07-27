@@ -4,6 +4,18 @@ import glob
 import numpy as np
 from PIL import Image
 from torch.utils.data import Dataset
+from torchvision import transforms
+
+data_transforms = transforms.Compose([
+                transforms.Resize((256, 256), Image.ANTIALIAS),
+                transforms.ToTensor(),
+                transforms.CenterCrop(224),
+                transforms.Normalize(mean=[0.485, 0.456, 0.406],
+                                    std=[0.229, 0.224, 0.225])]) # from imagenet
+gt_transforms = transforms.Compose([
+                transforms.Resize((256, 256)),
+                transforms.ToTensor(),
+                transforms.CenterCrop(224)])
 
 class MVTecDataset(Dataset):
     def __init__(self, root, transform, gt_transform, phase, half=False):
@@ -67,4 +79,41 @@ class MVTecDataset(Dataset):
 
         return img, gt, label, os.path.basename(img_path[:-4]), img_type
 
+# for calibration purposes
+class RandomImageDataset(Dataset):
+    def __init__(self, num_images, transform=None):
+        self.num_images = num_images
+        self.transform = transform
 
+    def __len__(self):
+        return self.num_images
+
+    def __getitem__(self, idx):
+        # Generate a random image
+        image = np.random.randint(0, 256, size=(224, 224, 3), dtype=np.uint8)
+
+        # Convert numpy array to PIL image
+        image = transforms.ToPILImage()(image)
+
+        # Apply transformations if provided
+        if self.transform:
+            image = self.transform(image)
+
+        return image, 0, 0, 0, 0
+    
+    
+class Own_Imagenet(Dataset):
+    def __init__(self, transform, phase = 'val', root = r'/mnt/crucial/UNI/IIIT_Muen/MA/ImageNet/ILSVRC/Data/CLS-LOC'):
+        img_paths_full = glob.glob(os.path.join(root, phase) + "/*.JPEG")
+        self.img_paths = np.random.choice(img_paths_full, 5000, replace=False)
+        self.transform = transform
+
+    def __len__(self):
+        return len(self.img_paths)
+
+    def __getitem__(self, idx):
+        img_path = self.img_paths[idx]
+        img = Image.open(img_path).convert('RGB')
+        img = self.transform(img)
+        
+        return img, 0, 0, 0, 0

@@ -10,7 +10,7 @@ from time import perf_counter
 import numpy as np
 from torchvision import transforms
 from PIL import Image
-from .datasets import MVTecDataset
+
 import os
 import torchvision
 import glob
@@ -98,167 +98,72 @@ def calibrate_model(model, loader, device=torch.device("cpu:0")):
             x, _, _, _, _ = inputs
             _ = model(x)
         
-def quantize_model_into_qint8(model, layers_needed = None, category = 'own', cpu_arch = 'x86', dataset_path = r"/mnt/crucial/UNI/IIIT_Muen/MA/MVTechAD/"):
+def quantize_model_into_qint8(model, layers_needed = None, calibrate = None, category = 'own', cpu_arch = 'x86', dataset_path = r"/mnt/crucial/UNI/IIIT_Muen/MA/MVTechAD/"):
     '''
     Quantizes a model into quint8. Utilizes layer fusion and calibration.
+    
+    Choices for arg calibrate:
+        - None: no calibration in order to load a pretrained model's state dict
+        - str(target): calibrate with target domain (train data of target domain)
+        - str(mvtec): calibrate with MVTec dataset (stacked training data of all MVTec categories)
+        - str(imagenet): calibrate with random subset (size 5000, subject to change) of Imagenet dataset (validation data of Imagenet)
+        - str(random): calibrate with random images uniformly distributed in [0, 255]
     '''
     st = perf_counter()    
-    data_transforms = transforms.Compose([
-                    transforms.Resize((256, 256), Image.ANTIALIAS),
-                    transforms.ToTensor(),
-                    transforms.CenterCrop(224),
-                    transforms.Normalize(mean=[0.485, 0.456, 0.406],
-                                        std=[0.229, 0.224, 0.225])]) # from imagenet
-    gt_transforms = transforms.Compose([
-                    transforms.Resize((256, 256)),
-                    transforms.ToTensor(),
-                    transforms.CenterCrop(224)])
-    
-    
-    
-    # cats = ['bottle','own', 'cable', 'capsule', 'carpet', 'grid', 'hazelnut', 'leather', 'metal_nut', 'pill', 'screw', 'tile', 'toothbrush', 'transistor', 'wood', 'zipper']
-    # if False:
-    # first option: calibrate with target domain
-    # data_path = os.path.join(dataset_path, category)
-    # dataset = MVTecDataset(root=data_path, transform=data_transforms, gt_transform=gt_transforms, phase='train', half=False)
-    
-    # second option: calibrate with random images
-    # dataset = RandomImageDataset(num_images=1000, transform=data_transforms)
-    
-    # third option: calibrate with imagenet TODO
-    # dataset = torchvision.datasets.ImageNet(root='/mnt/crucial/UNI/IIIT_Muen/MA/ILSVRC2012/', split='val', transform=data_transforms)
-    dataset = Own_Imagenet(transform=data_transforms, phase = 'val', root = r'/mnt/crucial/UNI/IIIT_Muen/MA/ImageNet/ILSVRC/Data/CLS-LOC')
-    
-    
-    # fourth option: calibrate with stacked MCTec datasets
-    # cats = ['bottle', 'cable', 'capsule', 'carpet', 'grid', 'hazelnut', 'leather', 'metal_nut', 'pill', 'screw', 'tile', 'toothbrush', 'transistor', 'wood', 'zipper', 'own']
-    # dataset = None
-    # for cat in cats:
-    #     if dataset is None:
-    #         dataset = MVTecDataset(root=os.path.join(dataset_path, cat), transform=data_transforms, gt_transform=gt_transforms, phase='train', half=False)
-    #     else:
-    #         dataset = torch.utils.data.ConcatDataset([dataset, MVTecDataset(root=os.path.join(dataset_path, cat), transform=data_transforms, gt_transform=gt_transforms, phase='train', half=False)])
-        
-            
-    loader = DataLoader(dataset, batch_size=10, shuffle=True, num_workers=12)
-
+    print('\nQuantizing model into qint8')
     # load model
-    # model = Backbone(model_id='RN34', layers_needed=[2], layer_cut=True, prune_output_layer=(False, []), sigmoid_in_last_layer=False, need_for_own_last_layer=False, quantize_qint8=True).cpu()
     fused_model = model.model.eval()
+    
     # fuse model
-    # print(fused_model)
     fuse_list = generate_fuse_list(fused_model)
     a = fuse_model(fused_model, fuse_list)
+    
     # add quantization layers
     b = QuantizedModel(a, layers_needed=layers_needed)
     
     # set config for architecture
-    print('\n\n')
-    print(b)
-    print('\n\n')
-    b.qconfig = torch.quantization.get_default_qconfig('fbgemm')#cpu_arch) # 'qnnpack','x86'
+    b.qconfig = torch.quantization.get_default_qconfig('fbgemm' if cpu_arch.__contains__('x86') else 'qnnpack')#cpu_arch) # 'qnnpack','x86'
     torch.quantization.prepare(b, inplace=True)
+    
     # calibrate using training data
-    calibrate_model(b, loader, device=torch.device("cpu:0"))
+    if calibrate:
+        if calibrate.lower().__contains__('target'):
+            from .datasets import MVTecDataset, data_transforms, gt_transforms
+            data_path = os.path.join(dataset_path, category)
+            dataset = MVTecDataset(root=data_path, transform=data_transforms, gt_transform=gt_transforms, phase='train', half=False)
+        elif calibrate.lower().__contains__('mvtec'):
+            from .datasets import MVTecDataset, data_transforms, gt_transforms
+            cats = ['bottle', 'cable', 'capsule', 'carpet', 'grid', 'hazelnut', 'leather', 'metal_nut', 'pill', 'screw', 'tile', 'toothbrush', 'transistor', 'wood', 'zipper', 'own']
+            dataset = None
+            for cat in cats:
+                if dataset is None:
+                    dataset = MVTecDataset(root=os.path.join(dataset_path, cat), transform=data_transforms, gt_transform=gt_transforms, phase='train', half=False)
+                else:
+                    dataset = torch.utils.data.ConcatDataset([dataset, MVTecDataset(root=os.path.join(dataset_path, cat), transform=data_transforms, gt_transform=gt_transforms, phase='train', half=False)])
+        elif calibrate.lower().__contains__('imagenet'):
+            from .datasets import Own_Imagenet, data_transforms
+            dataset = Own_Imagenet(transform=data_transforms, phase='val')
+        elif calibrate.lower().__contains__('random'):
+            from .datasets import RandomImageDataset, data_transforms
+            dataset = RandomImageDataset(num_images=100, transform=data_transforms)
+        loader = DataLoader(dataset, batch_size=16, shuffle=True, num_workers=12)
+        calibrate_model(b, loader, device=torch.device("cpu:0"))
+    else:
+        print('No calibration performed. It is recommended to load a pretrained model\'s state dict then.')
+    
     # finally convert into quantized model
     c = torch.quantization.convert(b, inplace=True)
     c.eval()
-    # print(c)
+    
     # test inference
-    for inputs in loader:
-        x, _, _, _, _ = inputs
-        # print(x.shape)
-        y = c(x)
-        break
-    # print(y)
+    if calibrate:
+        for inputs in loader:
+            x, _, _, _, _ = inputs
+            _ = c(x)
+            break
     et = perf_counter()
     print(f'Quantization took {(et-st):.2f} seconds')
     
     return c
 
 
-class RandomImageDataset(Dataset):
-    def __init__(self, num_images, transform=None):
-        self.num_images = num_images
-        self.transform = transform
-
-    def __len__(self):
-        return self.num_images
-
-    def __getitem__(self, idx):
-        # Generate a random image
-        image = np.random.randint(0, 256, size=(224, 224, 3), dtype=np.uint8)
-
-        # Convert numpy array to PIL image
-        image = transforms.ToPILImage()(image)
-
-        # Apply transformations if provided
-        if self.transform:
-            image = self.transform(image)
-
-        return image, 0, 0, 0, 0
-    
-    
-class Own_Imagenet(Dataset):
-    def __init__(self, transform, phase = 'val', root = r'/mnt/crucial/UNI/IIIT_Muen/MA/ImageNet/ILSVRC/Data/CLS-LOC'):
-        # if phase=='train':
-        #     self.img_path = os.path.join(root, 'train')
-        # else:
-        #     self.img_path = os.path.join(root, 'test')
-        #     self.gt_path = os.path.join(root, 'ground_truth')
-        img_paths_full = glob.glob(os.path.join(root, phase) + "/*.JPEG")
-        self.img_paths = np.random.choice(img_paths_full, 5000, replace=False)
-        self.transform = transform
-        # self.gt_transform = gt_transform
-        # load dataset
-        # self.img_paths 
-        # self.gt_paths
-        
-    # def load_dataset(self):
-
-        # img_tot_paths = []
-        # gt_tot_paths = []
-        # tot_labels = []
-        # tot_types = []
-
-        # defect_types = os.listdir(self.img_path)
-        
-        # for defect_type in defect_types:
-        #     if defect_type == 'good':
-        #         img_paths = glob.glob(os.path.join(self.img_path, defect_type) + "/*.png")
-        #         img_tot_paths.extend(img_paths)
-        #         gt_tot_paths.extend([0]*len(img_paths))
-        #         tot_labels.extend([0]*len(img_paths))
-        #         tot_types.extend(['good']*len(img_paths))
-        #     else:
-        #         img_paths = glob.glob(os.path.join(self.img_path, defect_type) + "/*.png")
-        #         gt_paths = glob.glob(os.path.join(self.gt_path, defect_type) + "/*.png")
-        #         img_paths.sort()
-        #         # gt_paths.sort()
-        #         img_tot_paths.extend(img_paths)
-        #         # gt_tot_paths.extend(gt_paths)
-        #         tot_labels.extend([1]*len(img_paths))
-        #         tot_types.extend([defect_type]*len(img_paths))
-
-        # assert len(img_tot_paths) == len(gt_tot_paths), "Something wrong with test and ground truth pair!"
-        
-        # return img_tot_paths, gt_tot_paths, tot_labels, tot_types
-
-    def __len__(self):
-        return len(self.img_paths)
-
-    def __getitem__(self, idx):
-        img_path = self.img_paths[idx]
-        img = Image.open(img_path).convert('RGB')
-        img = self.transform(img)
-        # if self.half:
-        #     img = img.half()
-        # if gt == 0:
-        #     gt = torch.zeros([1, img.size()[-2], img.size()[-2]])
-        # else:
-        #     gt = Image.open(gt)
-        #     gt = self.gt_transform(gt)
-        
-        # assert img.size()[1:] == gt.size()[1:], "image.size != gt.size !!!"
-
-        return img, 0, 0, 0, 0
