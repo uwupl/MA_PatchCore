@@ -172,6 +172,7 @@ class BasicBlock(nn.Module):
         self.downsample = downsample
         self.stride = stride
         self.quantize = quantize
+        self.add_relu = nn.quantized.FloatFunctional() # adapted
         
         if self.quantize:
             self.skip_add = nn.quantized.FloatFunctional()
@@ -190,10 +191,12 @@ class BasicBlock(nn.Module):
             identity = self.downsample(x)
 
         if self.quantize: 
-            out = self.skip_add.add(out, identity) # adapted
+            out = self.skip_add.add_relu(out, identity) # adapted
         else:
             out += identity
-        out = self.relu(out)
+            out = self.relu(out)
+        # out = self.relu(out)
+        # out = self.add_relu.add_relu(out, identity) # adapted
 
         return out
 

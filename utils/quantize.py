@@ -13,6 +13,7 @@ from PIL import Image
 from .datasets import MVTecDataset
 import os
 import torchvision
+import glob
 
 
 class QuantizedModel(nn.Module):
@@ -20,9 +21,9 @@ class QuantizedModel(nn.Module):
         super(QuantizedModel, self).__init__()
         # self.quant = torch.quantization.QuantStub()
         self.model = nn.Sequential(
-            torch.quantization.QuantStub(),
+            torch.ao.quantization.QuantStub(),
             model,
-            torch.quantization.DeQuantStub()
+            torch.ao.quantization.DeQuantStub()
         )
         self.layers_needed = layers_needed
         if self.layers_needed is not None:
@@ -81,21 +82,21 @@ def generate_fuse_list(model):
 
 def fuse_model(model, fuse_list):
     # print(fuse_list)
-    fused_model = torch.quantization.fuse_modules(model, fuse_list)
+    fused_model = torch.quantization.fuse_modules(model, fuse_list, inplace=True)
 
     return fused_model
 
 def calibrate_model(model, loader, device=torch.device("cpu:0")):
 
     model.to(device)
-    model.eval()
-
-    for inputs in loader:
-        # print(inputs[0].shape)
-        # inputs = inputs.to(device)
-        # # labels = labels.to(device)
-        x, _, _, _, _ = inputs
-        _ = model(x)
+    # model.eval()
+    with torch.inference_mode():
+        for inputs in loader:
+            # print(inputs[0].shape)
+            # inputs = inputs.to(device)
+            # # labels = labels.to(device)
+            x, _, _, _, _ = inputs
+            _ = model(x)
         
 def quantize_model_into_qint8(model, layers_needed = None, category = 'own', cpu_arch = 'x86', dataset_path = r"/mnt/crucial/UNI/IIIT_Muen/MA/MVTechAD/"):
     '''
@@ -126,18 +127,20 @@ def quantize_model_into_qint8(model, layers_needed = None, category = 'own', cpu
     
     # third option: calibrate with imagenet TODO
     # dataset = torchvision.datasets.ImageNet(root='/mnt/crucial/UNI/IIIT_Muen/MA/ILSVRC2012/', split='val', transform=data_transforms)
+    dataset = Own_Imagenet(transform=data_transforms, phase = 'val', root = r'/mnt/crucial/UNI/IIIT_Muen/MA/ImageNet/ILSVRC/Data/CLS-LOC')
+    
     
     # fourth option: calibrate with stacked MCTec datasets
-    cats = ['bottle', 'cable', 'capsule', 'carpet', 'grid', 'hazelnut', 'leather', 'metal_nut', 'pill', 'screw', 'tile', 'toothbrush', 'transistor', 'wood', 'zipper', 'own']
-    dataset = None
-    for cat in cats:
-        if dataset is None:
-            dataset = MVTecDataset(root=os.path.join(dataset_path, cat), transform=data_transforms, gt_transform=gt_transforms, phase='train', half=False)
-        else:
-            dataset = torch.utils.data.ConcatDataset([dataset, MVTecDataset(root=os.path.join(dataset_path, cat), transform=data_transforms, gt_transform=gt_transforms, phase='train', half=False)])
+    # cats = ['bottle', 'cable', 'capsule', 'carpet', 'grid', 'hazelnut', 'leather', 'metal_nut', 'pill', 'screw', 'tile', 'toothbrush', 'transistor', 'wood', 'zipper', 'own']
+    # dataset = None
+    # for cat in cats:
+    #     if dataset is None:
+    #         dataset = MVTecDataset(root=os.path.join(dataset_path, cat), transform=data_transforms, gt_transform=gt_transforms, phase='train', half=False)
+    #     else:
+    #         dataset = torch.utils.data.ConcatDataset([dataset, MVTecDataset(root=os.path.join(dataset_path, cat), transform=data_transforms, gt_transform=gt_transforms, phase='train', half=False)])
         
             
-    loader = DataLoader(dataset, batch_size=10, shuffle=False, num_workers=12)
+    loader = DataLoader(dataset, batch_size=10, shuffle=True, num_workers=12)
 
     # load model
     # model = Backbone(model_id='RN34', layers_needed=[2], layer_cut=True, prune_output_layer=(False, []), sigmoid_in_last_layer=False, need_for_own_last_layer=False, quantize_qint8=True).cpu()
@@ -194,3 +197,68 @@ class RandomImageDataset(Dataset):
             image = self.transform(image)
 
         return image, 0, 0, 0, 0
+    
+    
+class Own_Imagenet(Dataset):
+    def __init__(self, transform, phase = 'val', root = r'/mnt/crucial/UNI/IIIT_Muen/MA/ImageNet/ILSVRC/Data/CLS-LOC'):
+        # if phase=='train':
+        #     self.img_path = os.path.join(root, 'train')
+        # else:
+        #     self.img_path = os.path.join(root, 'test')
+        #     self.gt_path = os.path.join(root, 'ground_truth')
+        img_paths_full = glob.glob(os.path.join(root, phase) + "/*.JPEG")
+        self.img_paths = np.random.choice(img_paths_full, 5000, replace=False)
+        self.transform = transform
+        # self.gt_transform = gt_transform
+        # load dataset
+        # self.img_paths 
+        # self.gt_paths
+        
+    # def load_dataset(self):
+
+        # img_tot_paths = []
+        # gt_tot_paths = []
+        # tot_labels = []
+        # tot_types = []
+
+        # defect_types = os.listdir(self.img_path)
+        
+        # for defect_type in defect_types:
+        #     if defect_type == 'good':
+        #         img_paths = glob.glob(os.path.join(self.img_path, defect_type) + "/*.png")
+        #         img_tot_paths.extend(img_paths)
+        #         gt_tot_paths.extend([0]*len(img_paths))
+        #         tot_labels.extend([0]*len(img_paths))
+        #         tot_types.extend(['good']*len(img_paths))
+        #     else:
+        #         img_paths = glob.glob(os.path.join(self.img_path, defect_type) + "/*.png")
+        #         gt_paths = glob.glob(os.path.join(self.gt_path, defect_type) + "/*.png")
+        #         img_paths.sort()
+        #         # gt_paths.sort()
+        #         img_tot_paths.extend(img_paths)
+        #         # gt_tot_paths.extend(gt_paths)
+        #         tot_labels.extend([1]*len(img_paths))
+        #         tot_types.extend([defect_type]*len(img_paths))
+
+        # assert len(img_tot_paths) == len(gt_tot_paths), "Something wrong with test and ground truth pair!"
+        
+        # return img_tot_paths, gt_tot_paths, tot_labels, tot_types
+
+    def __len__(self):
+        return len(self.img_paths)
+
+    def __getitem__(self, idx):
+        img_path = self.img_paths[idx]
+        img = Image.open(img_path).convert('RGB')
+        img = self.transform(img)
+        # if self.half:
+        #     img = img.half()
+        # if gt == 0:
+        #     gt = torch.zeros([1, img.size()[-2], img.size()[-2]])
+        # else:
+        #     gt = Image.open(gt)
+        #     gt = self.gt_transform(gt)
+        
+        # assert img.size()[1:] == gt.size()[1:], "image.size != gt.size !!!"
+
+        return img, 0, 0, 0, 0

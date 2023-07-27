@@ -73,7 +73,7 @@ class Backbone(nn.Module):
                 self.model = resnet50(weights=weights)
                 self.procedure_resnet()
         elif self.quantize_qint8_torchvision:
-            if self.model_id.__contains__('RN50'):
+            if self.model_id.__contains__('RN50'): # this is actually a WideResNet50
                 weights = models.quantization.ResNet50_QuantizedWeights.DEFAULT
                 self.model = models.quantization.resnet50(weights=weights, quantize=True)
                 self.procedure_resnet()
