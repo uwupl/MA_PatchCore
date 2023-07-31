@@ -721,4 +721,10 @@ if __name__ == '__main__':
                 print(f'inference time: {round(et-st, 5)}s')
                 break
             
+class FeatureAdaptor(nn.Module):
+    def __init__(self, input_size, output_size):
+        super(FeatureAdaptor, self).__init__()
+        self.fc = nn.Linear(input_size, output_size, bias=False)
     
+    def forward(self, x):
+        return self.fc(x)        

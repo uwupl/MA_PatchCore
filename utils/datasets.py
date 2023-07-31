@@ -101,7 +101,6 @@ class RandomImageDataset(Dataset):
 
         return image, 0, 0, 0, 0
     
-    
 class Own_Imagenet(Dataset):
     def __init__(self, transform, phase = 'val', root = r'/mnt/crucial/UNI/IIIT_Muen/MA/ImageNet/ILSVRC/Data/CLS-LOC'):
         img_paths_full = glob.glob(os.path.join(root, phase) + "/*.JPEG")

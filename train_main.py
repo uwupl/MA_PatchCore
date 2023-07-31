@@ -1,6 +1,7 @@
 
 import os
 from utils.backbone import Backbone, prune_naive, prune_model_nni, prune_output_layer, quantize_model, compress_model_nni
+from utils.feature_adaptor import get_feature_adaptor, FeatureAdaptor
 from utils.datasets import MVTecDataset
 from utils.utils import min_max_norm, heatmap_on_image, cvt2heatmap, record_gpu, modified_kNN_score_calc, prep_dirs #  distance_matrix, softmax
 from utils.pooling import adaptive_pooling
@@ -117,6 +118,8 @@ class PatchCore(pl.LightningModule):
         self.quantize_model_with_nni = False
         self.quantize_model_pytorch = False
         self.quantize_qint8 = False
+        self.adapt_feature = False
+        self.feature_adaptor = None
         self.calibration_dataset = 'imagenet' # options: 'target', 'mvtec', 'imagenet', 'random' or None for no calibration and loading pretrained model; only relevant if self.quantize_qint8 = True
         self.quantize_qint8_torchvision = False
         # self.idx_chosen = np.array([], dtype=np.int32)
@@ -278,6 +281,8 @@ class PatchCore(pl.LightningModule):
         '''
         TODO
         '''
+        ### temp ###
+        # if self.adapt_feature:
         # initialize paths
         self.log_path = os.path.join(os.path.dirname(__file__), "results",f"{self.group_id}", "csv")
         if not os.path.exists(self.log_path):
@@ -292,7 +297,7 @@ class PatchCore(pl.LightningModule):
         
         # get backbone
         # self.need_for_own_last_layer = self.need_for_own_last_layer # TODO #,self.prune_output_layer[0] # if relu is last activation, but we want to prune the output layer, we need to set this to true to get own last layer
-        if self.cuda_active_training:
+        if self.cuda_active_training or self.cuda_active:
             self.model = Backbone(model_id=self.model_id, layers_needed=self.layers_needed, layer_cut=self.layer_cut, prune_output_layer=(False, []), prune_torch_pruning=self.prune_torch_pruning, prune_l1_norm=self.prune_l1_unstructured, exclude_relu=self.exclude_relu, sigmoid_in_last_layer = self.sigmoid_in_last_layer, need_for_own_last_layer=self.need_for_own_last_layer, quantize_qint8_prepared=self.quantize_qint8, quantize_qint8_torchvision=self.quantize_qint8_torchvision).cuda().eval() #, prune_l1_norm=self.prune_l1_unstructured
             if self.quantize_qint8:
                 raise NotImplementedError('qint8 quantization for GPU not implemented')
@@ -374,7 +379,7 @@ class PatchCore(pl.LightningModule):
                 raise NotImplementedError('qint8 quantization for GPU not implemented')
         else:
             if not (self.quantize_qint8 or self.quantize_qint8_torchvision): # then it is fine to load the model entirely
-                self.model = torch.load(os.path.join(self.embedding_dir_path,'backbone.pth'))#.cpu()#, map_location=torch.device('cpu'))
+                self.model = torch.load(os.path.join(self.embedding_dir_path,'backbone.pth'), map_location=torch.device('cpu'))#.cpu()#, map_location=torch.device('cpu'))
             else: # in this case we have to create an instance of the model first and load the state dict afterwards to get the same configuration as during training
                  
                 # args have to match training!
@@ -385,6 +390,12 @@ class PatchCore(pl.LightningModule):
                                         
         self.model.eval()
         print(self.model)
+        
+        # load feature adaptor
+        if self.adapt_feature:
+            device = torch.device("cuda" if self.cuda_active and torch.cuda.is_available() else "cpu")
+            self.feature_adaptor = torch.load(os.path.join(self.embedding_dir_path,'feature_adaptor.pth')).to(device)
+        
         # load coreset and initialize knn search
         if not self.multiple_coresets[0] or self.multiple_coresets[1] == 1:
             if self.faiss_standard or self.faiss_quantized:
@@ -432,6 +443,7 @@ class PatchCore(pl.LightningModule):
     def training_step(self, batch, batch_idx): # save locally aware patch features
         x, _, _, _, _ = batch
         features = self.model(x)
+
         # if self.quantize_qint8:
         #     features = list([features]) # TODO: probably because of missing forward hook there is no list of tensores as an output, but directly a tensor
         if self.save_features: # only one layer at a time!!
@@ -452,13 +464,18 @@ class PatchCore(pl.LightningModule):
                 embeddings.append(pooled_feature)
             
         embedding = embedding_concat_frame(embeddings=embeddings, cuda_active=self.cuda_active) # shape (batch, 448, 16, 16) --> default
+        reshaped_embeddings = reshape_embedding(np.array(embedding))
+        # if self.adapt_feature: # feature adaptor is trained after feauters are extracted by regular backbone
+            # reshaped_embeddings = self.feature_adaptor(torch.from_numpy(reshaped_embeddings)).detach().numpy()
         if batch_idx == int(0):
-            self.embedding_np = reshape_embedding(np.array(embedding))
+            self.embedding_np = reshaped_embeddings
         else:
             # print('lo')
             # print(embedding.shape)
-            self.embedding_np = np.append(self.embedding_np, reshape_embedding(np.array(embedding)), axis=0)#.extend(reshape_embedding(np.array(embedding)))
-            
+            self.embedding_np = np.append(self.embedding_np, reshaped_embeddings, axis=0)#.extend(reshape_embedding(np.array(embedding)))
+        
+                ### temp ###
+
     def select_channels_core(self, total_embeddings):
         '''
         Select channels based on chosen scheme. If scheme is 'std', the channels with the highest std are chosen.
@@ -574,6 +591,15 @@ class PatchCore(pl.LightningModule):
         total_embeddings = self.select_channels(total_embeddings)#, pretrain=False)
         # Random projection
         
+        if self.adapt_feature:
+            self.feature_adaptor = get_feature_adaptor(total_embeddings, shrinking_factor=0.5, std_factor=0.01, batch_size=32, num_workers=12, lr=0.0005, epochs=12, use_cuda=torch.cuda.is_available()) # default arguments are used
+            # todo device check
+            torch.save(self.feature_adaptor, os.path.join(self.embedding_dir_path, 'feature_adaptor.pth'))
+            device='cuda:0' if (self.cuda_active and torch.cuda.is_available()) else 'cpu'
+            self.feature_adaptor = self.feature_adaptor.to(device=device)
+            torch_features = torch.from_numpy(total_embeddings).to(device=device)
+            total_embeddings = self.feature_adaptor(torch_features).detach().cpu().numpy() #TODO
+        
         self.pretrain_for_channel_selection = self.pretrain_for_channel_selection_copy#.copy()
         if self.quantize_model_with_nni:
             self.model = compress_model_nni(self.model)
@@ -629,7 +655,7 @@ class PatchCore(pl.LightningModule):
                     if self.embedding_coreset is None:
                         self.embedding_coreset = np.expand_dims(total_embeddings[selected_idx], 0)
                     else:
-                        self.embedding_coreset = np.vstack(self.embedding_coreset, np.expand_dims(total_embeddings[selected_idx], 0))
+                        self.embedding_coreset = np.vstack((self.embedding_coreset, np.expand_dims(total_embeddings[selected_idx], 0)))
                 elif self.coreset_sampling_method.__contains__('random_selection'):
                     selected_idx = np.random.choice(total_embeddings.shape[0], int(total_embeddings.shape[0]*self.coreset_sampling_ratio), replace=False)
                     if self.embedding_coreset is None:
@@ -943,8 +969,9 @@ class PatchCore(pl.LightningModule):
         '''
         if self.cuda_active:
             x = x.cuda()
-        else:
-            return self.model(x)
+        # else:
+        out = self.model(x)
+        return out
         
     def feature_embedding(self, features, batch_size_1, batch_size):
         '''
@@ -989,6 +1016,11 @@ class PatchCore(pl.LightningModule):
         if self.weight_by_entropy:
             flattened_features = np.multiply(flattened_features, self.weights)
             
+        ### temp
+        if self.adapt_feature and self.feature_adaptor is not None:
+            torch_features = torch.from_numpy(flattened_features).to(device='cuda:0' if self.cuda_active and torch.cuda.is_available() else 'cpu')
+            flattened_features = self.feature_adaptor(torch_features).detach().cpu().numpy()
+    
         return flattened_features
         
     def calc_score_patches(self, embeddings, batch_size_1):
@@ -1153,6 +1185,12 @@ class PatchCore(pl.LightningModule):
                 'faiss_quantized': self.faiss_quantized,
                 'own_knn': self.own_knn,
                 'distance_metric': self.metrices[self.metric_id],
+                'multiple_coresets': 1 if not self.multiple_coresets[0] else self.multiple_coresets[1],
+                'feature_adaptor': self.adapt_feature,
+                'own_qint8': self.quantize_qint8,
+                'torchvision_qint8': self.quantize_qint8_torchvision,
+                'pooling_strategy': str(self.pooling_strategy),
+                'category_wise_statistics': self.category_wise_statistics,
                 'backbone_storage_[MB]': estimated_total_size,
                 'backbone_mult_adds_[M]': number_of_mult_adds,
                 'feature_extraction_[ms]': pd_run_times['#1 feature extraction cpu'].mean() if self.measure_inference else 0.0,
@@ -1192,31 +1230,32 @@ if __name__ == '__main__':
     import warnings
     warnings.filterwarnings("ignore") 
 
-    os.environ['CUDA_VISIBLE_DEVICES'] = '-1'
+    # os.environ['CUDA_VISIBLE_DEVICES'] = '-1'
     train_and_test = True
     model = PatchCore()#args=args)
     model.model_id = 'RN18'
     model.layers_needed = [2,3]
-    model.layer_cut = False
+    model.layer_cut = True
     # model.hooks_needed = False
     model.need_for_own_last_layer = False
     model.adapted_score_calc = True
     model.n_neighbors = 4
     model.n_next_patches = 16
-    model.cuda_active = False
-    model.cuda_active_training = False
+    model.cuda_active = True
+    model.cuda_active_training = True
     model.quantize_qint8 = False
     model.calibration_dataset = 'random'
-    model.coreset_sampling_method = 'random_selection'
+    model.coreset_sampling_method = 'k_center_greedy'
     model.measure_inference = False
     model.quantize_qint8_torchvision = False
     model.own_knn = True
     model.faiss_standard = False
     model.specific_number_of_examples = 1000
-    model.category = 'pill'
-    model.layer_cut = True
+    # model.category = 'pill'
     model.save_embeddings = False
-    model.metric_id = 17    
+    model.metric_id = 0
+    model.adapt_feature = True
+    model.multiple_coresets = [True, 10]
     # model.metric_id = 4 # cosine
     # model.metric_id = 2 # manhattan / L1
     

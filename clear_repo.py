@@ -1,3 +1,9 @@
 from utils.utils import remove_uncomplete_runs, remove_test_dir
-remove_test_dir()
-remove_uncomplete_runs()
+try:
+    remove_test_dir()
+except:
+    print("No test dir to remove")
+try:
+    remove_uncomplete_runs()
+except:
+    print("Removal failed")
